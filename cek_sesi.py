@@ -1,13 +1,20 @@
 import json
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from tempfile import TemporaryDirectory
 from pathlib import Path
+from threading import Thread
 from unittest import TestCase
 from unittest.mock import call, patch
 from camoufox.sync_api import Camoufox
 from openpyxl import Workbook, load_workbook
 from playwright.sync_api import expect
-from fasih import FIELDS, SELECTORS, buka_usaha, identitas, inputan, isi_remarks, main, pasang_refresh, pesan_galat, sesi, tab_survei
+from fasih import FIELDS, PESAN_BOT, SELECTORS, buka_usaha, identitas, inputan, isi_remarks, main, pasang_refresh, pesan_galat, sesi, tab_survei
+
+pesan_bot = ("BOT-12345678", "Bot Detected", "Anda terdeteksi sebagai bot", "Terdeteksi bot",
+             "Kami mendeteksi perilaku yang tidak wajar pada koneksi Anda", "Sistem kami mendeteksi koneksi Anda sebagai bot")
+assert all(PESAN_BOT.search(text) for text in pesan_bot)
+assert not PESAN_BOT.search("USAHA ROBOTIKA")
 
 with TemporaryDirectory() as temp:
     path = Path(temp) / "sesi.json"
@@ -15,9 +22,76 @@ with TemporaryDirectory() as temp:
         fingerprint = identitas(Path(temp) / "fingerprint.json")
         assert identitas(Path(temp) / "fingerprint.json") == fingerprint
         with Camoufox(headless=True, os="windows", fingerprint=fingerprint, i_know_what_im_doing=True) as browser:
+            if run == 0:
+                permintaan = []
+                normal = '<button>Ringkasan</button><script src="/asset.js"></script>'
+                jawaban = ['<p>Bot Detected</p><script src="/asset.js"></script>'] * 2 + [normal]
+                class Halaman(BaseHTTPRequestHandler):
+                    def do_GET(self):
+                        permintaan.append(self.path)
+                        asset = self.path == "/asset.js"
+                        body = ("window.asset=true" if asset else "" if self.path == "/favicon.ico" else jawaban.pop(0) if len(jawaban) > 1 else jawaban[0]).encode()
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/javascript" if asset else "text/html")
+                        self.send_header("Cache-Control", "public, max-age=3600" if asset else "no-store")
+                        self.send_header("Content-Length", str(len(body)))
+                        self.end_headers()
+                        with suppress(ConnectionError):
+                            self.wfile.write(body)
+                    def log_message(self, *_):
+                        pass
+                with ThreadingHTTPServer(("127.0.0.1", 0), Halaman) as server:
+                    worker = Thread(target=server.serve_forever, daemon=True)
+                    worker.start()
+                    try:
+                        with browser.new_context() as cache:
+                            tab = cache.new_page()
+                            pasang_refresh(tab)
+                            url = f"http://127.0.0.1:{server.server_port}/"
+                            tab.goto(url)
+                            tab.evaluate("() => { localStorage.setItem('uji','tetap'); sessionStorage.setItem('uji','tetap'); document.cookie='uji=tetap; path=/'; }")
+                            tab.goto(url + "?hangat")
+                            assert permintaan.count("/asset.js") == 1, "Cache uji belum aktif"
+                            with patch.object(tab, "wait_for_timeout") as tunggu:
+                                expect(tab.get_by_role("button", name="Ringkasan", exact=True)).to_be_visible(timeout=10000)
+                                tunggu.assert_called_once_with(30000)
+                            tab.wait_for_load_state("load")
+                            assert permintaan.count("/asset.js") == 2, "Hard refresh tidak melewati cache"
+                            assert tab.evaluate("() => [localStorage.getItem('uji'), sessionStorage.getItem('uji'), document.cookie]") == ["tetap", "tetap", "uji=tetap"]
+                            for text in pesan_bot:
+                                jawaban = [f'<p>{text}</p>', normal]
+                                pasang_refresh(tab)
+                                tab.goto(url)
+                                with patch.object(tab, "wait_for_timeout") as tunggu:
+                                    expect(tab.get_by_role("button", name="Ringkasan", exact=True)).to_be_visible(timeout=10000)
+                                    tunggu.assert_called_once_with(30000)
+                                tab.wait_for_load_state("load")
+                                assert jawaban == [normal]
+                            tab.set_content('<p>Bot Detected</p><button>Ringkasan</button>')
+                            with patch.object(tab, "wait_for_timeout") as tunggu:
+                                expect(tab.get_by_role("button", name="Ringkasan", exact=True)).to_be_visible(timeout=1000)
+                                tunggu.assert_not_called()
+                            pasang_refresh(tab)
+                            with patch.object(tab, "wait_for_timeout", side_effect=lambda _: tab.set_content(normal)) as tunggu, patch.object(tab, "evaluate", wraps=tab.evaluate) as javascript:
+                                expect(tab.get_by_role("button", name="Ringkasan", exact=True)).to_be_visible(timeout=1000)
+                                tunggu.assert_called_once_with(30000)
+                                javascript.assert_not_called()
+                            jawaban = ['<p>Bot Detected</p>']
+                            pasang_refresh(tab)
+                            tab.goto(url)
+                            jumlah = permintaan.count("/")
+                            with patch.object(tab, "wait_for_timeout") as tunggu:
+                                for _ in range(2):
+                                    with TestCase().assertRaises(AssertionError):
+                                        expect(tab.get_by_role("button", name="Ringkasan", exact=True)).to_be_visible(timeout=1000)
+                                tunggu.assert_called_once_with(30000)
+                            assert permintaan.count("/") == jumlah + 1, "Hard refresh diulang tanpa batas"
+                    finally:
+                        server.shutdown()
+                        worker.join()
             context = browser.new_context()
             context.on("page", pasang_refresh)
-            context.route("**/*", lambda r: r.fulfill(body="<!doctype html><title>Uji lokal</title>"))
+            context.route("**/*", lambda r: r.fulfill(body="<!doctype html><title>Uji lokal</title><body>Uji lokal</body>"))
             page = context.new_page()
             sesi(context, page, path)
             page.goto("https://fasih-sm.bps.go.id")
@@ -123,6 +197,30 @@ with TemporaryDirectory() as temp:
                 with TestCase().assertRaisesRegex(AssertionError, "beberapa kartu"):
                     buka_usaha(page, "USAHA KEMBAR")
                 assert page.locator('[data-clicked="true"]').count() == 0
+                page.set_content('<div id="se2026_nested"><div data-nested-view="true" onclick="this.dataset.clicked=\'true\'">USAHA LAIN</div></div>')
+                with patch("fasih.TIMEOUT", 2000), patch("fasih.TIMEOUT_CARI_USAHA", 100):
+                    with TestCase().assertRaisesRegex(AssertionError, "Kartu usaha tidak ditemukan: USAHA TARGET") as gagal:
+                        buka_usaha(page, "USAHA TARGET")
+                    assert "timeout 100ms" in str(gagal.exception)
+                    assert "Kartu terlihat: USAHA LAIN" in str(gagal.exception)
+                assert page.locator('[data-clicked="true"]').count() == 0
+                page.set_content('<div id="se2026_nested"></div>')
+                page.evaluate("html => setTimeout(() => document.querySelector('#se2026_nested').innerHTML=html, 250)",
+                              '<div data-nested-view="true" onclick="this.dataset.clicked=\'true\'">USAHA LAMBAT</div>')
+                with patch("fasih.TIMEOUT", 2000), patch("fasih.TIMEOUT_CARI_USAHA", 100):
+                    buka_usaha(page, "USAHA LAMBAT")
+                assert page.locator('[data-clicked="true"]').inner_text() == "USAHA LAMBAT"
+                page.set_content('<div id="se2026_nested"><div data-nested-view="true">USAHA LAIN</div></div>')
+                page.evaluate("html => setTimeout(() => document.querySelector('#se2026_nested').insertAdjacentHTML('beforeend',html), 250)",
+                              '<div data-nested-view="true" onclick="this.dataset.clicked=\'true\'">USAHA SUSULAN (PEMILIK A)</div>')
+                with patch("fasih.TIMEOUT_CARI_USAHA", 1000):
+                    buka_usaha(page, "USAHA SUSULAN <PEMILIK A>")
+                assert page.locator('[data-clicked="true"]').inner_text() == "USAHA SUSULAN (PEMILIK A)"
+                page.set_content('<div id="se2026_nested"></div>')
+                with patch("fasih.TIMEOUT", 100), patch("fasih.TIMEOUT_CARI_USAHA", 10):
+                    with TestCase().assertRaisesRegex(AssertionError, "Daftar kartu usaha BLOK II tidak muncul") as gagal:
+                        buka_usaha(page, "USAHA TARGET")
+                    assert "timeout 100ms" in str(gagal.exception)
                 button_note = '<button class="tw:size-8 tw:relative tw:text-primary tw:@lg/form:flex! tw:hidden" onclick="document.querySelector(\'#editor\').hidden=false; document.body.dataset.field=this.parentElement.id"><svg class="tw:size-4" width="16" height="16"></svg></button>'
                 page.set_content('<div id="gaji#2099"><div class="tw:rounded-lg tw:gap-2"><div>26. a. Total upah dan gaji, serta jaminan sosial pegawai*Rp</div>'
                                  '<input value="0"></div>' + button_note
@@ -182,6 +280,7 @@ with TemporaryDirectory() as temp:
                 sheet.append(["lanjut", "USAHA BERIKUTNYA", *([None] * len(FIELDS)), None, "TODO"])
                 sheet.append(["ubah", "USAHA BERIKUTNYA", *[0 if k in ("tk_laki_laki", "upah_gaji") else None for k in FIELDS], "Hasil konfirmasi", "TODO"])
                 sheet.append(["tetap", "USAHA BERIKUTNYA", *[0 if k in ("tk_laki_laki", "upah_gaji") else None for k in FIELDS], "Tidak disalin", "TODO"])
+                sheet.append(["reload-edit", "USAHA BERIKUTNYA", *([None] * len(FIELDS)), None, "TODO"])
                 book.save(root / "uji.xlsx")
                 book.close()
                 context.route("**/app/assignment-detail/*", lambda r: r.fulfill(content_type="text/html",
@@ -190,7 +289,7 @@ with TemporaryDirectory() as temp:
                     '<button>Ringkasan</button><button onclick="this.hidden=true">'
                     '<svg class="tabler-icon tabler-icon-edit" width="24" height="24"></svg></button>'
                     '<div class="fasih-form-sidebar"><div title="SE2026 - L BLOK II">BLOK II</div>'
-                    '<div title="CATATAN">CATATAN</div></div><div id="se2026_nested">'
+                    '<div title="CATATAN" ' + ('onclick="location.reload()"' if r.request.url.endswith('/reload-edit') else '') + '>CATATAN</div></div><div id="se2026_nested">'
                     '<div data-nested-view="true"><span>USAHA BERIKUTNYA</span></div></div>'
                     '<div id="cek_anomali_button"><input role="switch" aria-checked="true"></div>'
                     + ''.join('<div id="' + key + '#2099"><div class="tw:rounded-lg tw:gap-2"><div>' + label + '</div><input value="'
@@ -199,12 +298,13 @@ with TemporaryDirectory() as temp:
                     + '<section id="editor" hidden><textarea placeholder="Tambah catatan di sini..."></textarea>'
                     '<button onclick="localStorage.setItem(\'remarks_\'+document.body.dataset.field,document.querySelector(\'textarea\').value)">Simpan</button>'
                     '<button onclick="this.parentElement.hidden=true">Dismiss</button></section><button>Kirim</button>')))
-                with patch("fasih.__file__", str(root / "fasih.py")), patch("fasih.TIMEOUT", 1000), \
+                with patch("fasih.__file__", str(root / "fasih.py")), patch("fasih.TIMEOUT", 1000), patch("fasih.TIMEOUT_CARI_USAHA", 100), \
                      patch("fasih.Camoufox", return_value=nullcontext(context)), patch("builtins.input", return_value=""), \
-                     patch("fasih.isi_remarks", wraps=isi_remarks) as remarks, patch("fasih.pesan_galat", return_value="Validasi uji"):
+                     patch("fasih.isi_remarks", wraps=isi_remarks) as remarks, patch("fasih.pesan_galat", return_value="Validasi uji") as validasi:
                     main()
                     assert remarks.call_count == 2
                     assert all(c.args[2] == "Hasil konfirmasi" for c in remarks.call_args_list)
+                    assert validasi.call_count == 1, "Form yang dimuat ulang diteruskan ke Kirim"
                 book = load_workbook(root / "uji.xlsx")
                 data = list(book["Sheet1"].values)
                 headers = list(data[0])
@@ -212,12 +312,55 @@ with TemporaryDirectory() as temp:
                 note = data[1][headers.index("catatan")]
                 assert note.startswith("Catatan operator\nBLOK II: membuka usaha USAHA CONTOH TIGA | AssertionError:")
                 assert "Kartu usaha tidak ditemukan" in note
+                assert "Kartu terlihat: USAHA BERIKUTNYA" in note
                 assert data[2][headers.index("status")] == "NO_CHANGE"
                 assert data[3][headers.index("status")] == "ERROR"
                 assert data[3][headers.index("keterangan")] == "Validasi uji"
                 assert data[4][headers.index("status")] == "NO_CHANGE"
+                assert data[5][headers.index("status")] == "ERROR"
+                assert data[5][headers.index("catatan")], "Reload saat mengedit tidak dicatat"
                 assert assignment.evaluate("localStorage.getItem('remarks_gaji#2099')") == "Hasil konfirmasi"
                 assert assignment.evaluate("localStorage.getItem('remarks_pekerja#2099')") == "Hasil konfirmasi"
                 assert context.pages == [assignment]
                 book.close()
+                for lokasi in ("assignment-detail", "uji-form"):
+                    book = Workbook()
+                    sheet = book.active
+                    sheet.title = "Sheet1"
+                    sheet.append(["id_fasih", "target_usaha", *FIELDS, "status", "catatan"])
+                    sheet.append(["expired", "USAHA BERIKUTNYA", *([None] * len(FIELDS)), "TODO", "Catatan operator"])
+                    sheet.append(["jangan-dibuka", "USAHA BERIKUTNYA", *([None] * len(FIELDS)), "TODO"])
+                    book.save(root / "uji.xlsx")
+                    book.close()
+                    pola = "**/" + ("app/" if lokasi == "assignment-detail" else "") + lokasi + "/expired"
+                    context.route(pola, lambda r: r.fulfill(status=302, headers={"location": "https://sso.bps.go.id/login"}))
+                    permintaan = []
+                    context.route("**/app/assignment-detail/jangan-dibuka", lambda r: (permintaan.append(r.request.url), r.fulfill(body="Tidak boleh dibuka")))
+                    with patch("fasih.__file__", str(root / "fasih.py")), patch("fasih.TIMEOUT", 1000), \
+                         patch("fasih.Camoufox", return_value=nullcontext(context)), patch("builtins.input", return_value=""), \
+                         patch("builtins.print") as output:
+                        main()
+                    assert not permintaan, "Skrip lanjut ke baris berikutnya setelah logout"
+                    assert any("Progres disimpan; proses dihentikan" in str(c) for c in output.call_args_list)
+                    book = load_workbook(root / "uji.xlsx")
+                    data = list(book["Sheet1"].values)
+                    headers = list(data[0])
+                    assert data[1][headers.index("status")] == "ERROR"
+                    assert "Catatan operator\n" in data[1][headers.index("catatan")]
+                    assert "Dialihkan ke SSO BPS; perlu login manual" in data[1][headers.index("catatan")]
+                    assert data[2][headers.index("status")] == "TODO" and data[2][headers.index("catatan")] is None
+                    book.close()
+                    for tab in context.pages:
+                        if tab != assignment:
+                            tab.close()
+                    context.unroute(pola)
+                    context.unroute("**/app/assignment-detail/jangan-dibuka")
+                context.route("**/app/surveys?*", lambda r: r.fulfill(status=302, headers={"location": "https://sso.bps.go.id/login"}))
+                with patch("fasih.__file__", str(root / "fasih.py")), patch("fasih.TIMEOUT", 1000), \
+                     patch("fasih.Camoufox", return_value=nullcontext(context)), patch("builtins.input") as prompt, \
+                     patch("fasih.simpan") as simpan, patch("builtins.print") as output:
+                    main()
+                prompt.assert_not_called()
+                simpan.assert_not_called()
+                assert any("Sesi FASIH berakhir" in str(c) for c in output.call_args_list)
             context.close()

@@ -14,6 +14,8 @@ from openpyxl import load_workbook
 from playwright.sync_api import Error, expect
 
 TIMEOUT = 90_000
+TIMEOUT_CARI_USAHA = 5_000
+PESAN_BOT = re.compile(r"\bBOT-\d+\b|\bbot\s+detected\b|(?:terdeteksi|teridentifikasi)\s+(?:sebagai\s+)?(?:bot|robot)\b|koneksi\s+anda\s+sebagai\s+bot\b|(?:kami\s+mendeteksi|sistem\s+kami\s+mendeteksi)\s+(?:perilaku\s+yang\s+tidak\s+wajar|koneksi)|perilaku\s+yang\s+tidak\s+wajar\s+pada\s+koneksi", re.I)
 
 FIELDS = {
     "tk_laki_laki": "Pekerja laki-laki",
@@ -65,18 +67,23 @@ def buka_usaha(page, target):
     target = " ".join(target.split())
     cards = page.locator(SELECTORS["kartu_usaha"])
     expect(cards.first, "Daftar kartu usaha BLOK II tidak muncul").to_be_visible(timeout=TIMEOUT)
+    daftar = page.locator("#se2026_nested")
+    pola_ringkas = pola_usaha(re.sub(r"\s*(?:\([^()<>]+\)|<[^()<>]+>?)$", "", target))
+    kandidat = daftar.get_by_text(pola_usaha(target)).or_(daftar.get_by_text(pola_ringkas)).filter(visible=True)
+    # ponytail: kartu muncul menandai daftar siap; gunakan indikator selesai jika tersedia.
+    terlihat = " | ".join(" ".join(text.split()) for text in cards.all_inner_texts())[:1500]
+    expect(kandidat.first, "Kartu usaha tidak ditemukan: " + target + " | Kartu terlihat: " + terlihat).to_be_visible(timeout=TIMEOUT_CARI_USAHA)
     pattern = re.compile(r"^\s*" + re.escape(target).replace(r"\ ", r"\s+") + r"\s*$", re.I)
-    name = page.locator("#se2026_nested").get_by_text(pattern).filter(visible=True)
+    name = daftar.get_by_text(pattern).filter(visible=True)
     if not name.count():
         pattern = pola_usaha(target)
-        name = page.locator("#se2026_nested").get_by_text(pattern).filter(visible=True)
+        name = daftar.get_by_text(pattern).filter(visible=True)
     ringkas = not name.count()
     if ringkas:
-        pattern = pola_usaha(re.sub(r"\s*(?:\([^()<>]+\)|<[^()<>]+>?)$", "", target))
-        name = page.locator("#se2026_nested").get_by_text(pattern).filter(visible=True)
+        name = daftar.get_by_text(pola_ringkas).filter(visible=True)
     card = name.locator('xpath=ancestor-or-self::*[@data-nested-view="true"][1]')
     assert card.count() <= 1, "Nama usaha cocok dengan beberapa kartu; tidak memilih sembarang kartu"
-    expect(card, "Kartu usaha tidak ditemukan: " + target).to_have_count(1, timeout=TIMEOUT)
+    expect(card, "Kartu usaha tidak ditemukan: " + target).to_have_count(1, timeout=TIMEOUT_CARI_USAHA)
     name.first.click()
     if ringkas:
         nama = page.locator(SELECTORS["nama_usaha"])
@@ -170,10 +177,20 @@ def tab_survei(browser):
 
 def pasang_refresh(page):
     refresh = page.get_by_role("button", name="Refresh Page", exact=True)
+    bot = page.get_by_text(PESAN_BOT).filter(visible=True).first
     def ulang():
         page.wait_for_timeout(30000)
         if refresh.is_visible():
             refresh.click(no_wait_after=True)
+    def hard_refresh():
+        page.wait_for_timeout(30000)
+        if bot.is_visible():
+            with page.expect_navigation(wait_until="commit", timeout=TIMEOUT - 30000):
+                # ponytail: khusus Firefox/Camoufox; browser lain perlu API bypass cache sendiri.
+                page.evaluate("() => { setTimeout(() => location.reload(true), 0); }")
+    page.remove_locator_handler(refresh)
+    page.remove_locator_handler(bot)
+    page.add_locator_handler(bot, hard_refresh, times=1)
     page.add_locator_handler(refresh, ulang, no_wait_after=True)
 
 def jeda(cfg, sisa):
@@ -231,7 +248,8 @@ def main():
     with path.open("r+b"):
         pass
     fingerprint = identitas(root / ".fasih-profile" / "fingerprint.json")
-    with Camoufox(persistent_context=True, user_data_dir=str(root / ".fasih-profile"), fingerprint=fingerprint, i_know_what_im_doing=True, headless=False, humanize=True, os="windows", locale="id-ID", slow_mo=random.uniform(cfg["action_min"], cfg["action_max"]) * 1000, timeout=TIMEOUT) as browser:
+    headless = True
+    with Camoufox(persistent_context=True, user_data_dir=str(root / ".fasih-profile"), fingerprint=fingerprint, i_know_what_im_doing=True, headless=headless, humanize=True, os="windows", locale="id-ID", slow_mo=random.uniform(cfg["action_min"], cfg["action_max"]) * 1000, timeout=TIMEOUT) as browser:
         browser.set_default_timeout(TIMEOUT)
         browser.set_default_navigation_timeout(TIMEOUT)
         browser.on("page", pasang_refresh)
@@ -240,6 +258,11 @@ def main():
         page = browser.pages[0] if browser.pages else browser.new_page()
         sesi(browser, page, root / ".fasih-profile" / "sesi.json")
         page.goto("https://fasih-sm.bps.go.id/app/surveys?page=0&perPage=10&layout=list", wait_until="commit")
+        expect(page.locator("body")).to_be_visible(timeout=TIMEOUT)
+        if headless and page.url.startswith("https://sso.bps.go.id/"):
+            print("Sesi FASIH berakhir. Proses dihentikan; login ulang sebelum menjalankan kembali.")
+            book.close()
+            return
         input("Setelah halaman Survei terbuka, tekan Enter di terminal... ")
         page = tab_survei(browser)
         page.wait_for_url("**/app/surveys?*", wait_until="commit")
@@ -251,8 +274,10 @@ def main():
             assignment = page
             tabs_sebelum = browser.pages
             result, note = "ERROR", ""
+            terlogout = False
             tahap = "Membuka assignment detail"
             try:
+                pasang_refresh(page)
                 page.goto("https://fasih-sm.bps.go.id/app/assignment-detail/" + quote(row["id_fasih"], safe=""), wait_until="commit")
                 tahap = "Membuka tab Review"
                 review = assignment.get_by_role("button", name="Review", exact=True)
@@ -277,6 +302,7 @@ def main():
                 page.locator(SELECTORS["blok_ii"]).click()
                 tahap = "BLOK II: membuka usaha " + row["target_usaha"]
                 buka_usaha(page, row["target_usaha"])
+                dokumen = page.evaluate("performance.timeOrigin")
                 for column, label in FIELDS.items():
                     if values[column] is None:
                         continue
@@ -301,6 +327,7 @@ def main():
                     page.locator(SELECTORS["kontrol_switch"]).click()
                     changed = True
                 expect(switch).to_have_attribute("aria-checked", "true", timeout=TIMEOUT)
+                assert page.evaluate("performance.timeOrigin") == dokumen, "Halaman dimuat ulang saat mengedit; periksa ulang perubahan sebelum retry"
                 if changed:
                     tahap = "Kirim: membuka dan membaca validasi"
                     page.get_by_role("button", name="Kirim", exact=True).click()
@@ -310,12 +337,15 @@ def main():
                         cell.data_type = "s"
                         note = "Galat validasi Kirim: " + detail
                     else:
+                        assert page.evaluate("performance.timeOrigin") == dokumen, "Halaman dimuat ulang saat validasi; periksa ulang perubahan sebelum retry"
                         tahap = "Kirim: menunggu konfirmasi"
                         page.locator(SELECTORS["modal"]).get_by_role("button", name="Kirim", exact=True).click()
                         expect(page.get_by_text("Konfirmasi Kirim", exact=True)).to_be_visible(timeout=TIMEOUT)
+                        assert page.evaluate("performance.timeOrigin") == dokumen, "Halaman dimuat ulang sebelum konfirmasi; hasil kirim perlu diperiksa sebelum retry"
                         tahap = "Konfirmasi Kirim; hasil kirim belum dipastikan"
                         page.get_by_role("button", name="Konfirmasi", exact=True).click()
                         expect(page.get_by_text("Assignment Berhasil DisubmitPerubahan Anda berhasil disimpan.", exact=True)).to_be_visible(timeout=TIMEOUT)
+                        assert page.evaluate("performance.timeOrigin") == dokumen, "Halaman dimuat ulang saat konfirmasi; hasil kirim perlu diperiksa sebelum retry"
                         result = "SUCCESS"
                         tahap = "Kirim berhasil; menutup konfirmasi sukses"
                         page.get_by_role("button", name="Tetap di Halaman", exact=True).click()
@@ -327,7 +357,8 @@ def main():
                 error_text = str(error).strip()
                 note = f"{tahap} | {type(error).__name__}: {error_text}"
                 kode = re.search(r"\bBOT-\d+\b", error_text)
-                if page.url.startswith("https://sso.bps.go.id/"):
+                if any(tab.url.startswith("https://sso.bps.go.id/") for tab in (page, assignment)):
+                    terlogout = True
                     note = tahap + " | Dialihkan ke SSO BPS; perlu login manual."
                 elif kode:
                     note = tahap + " | Akses diblokir sebagai bot: " + kode[0]
@@ -340,6 +371,9 @@ def main():
                 assert len(text) <= 32767, "Catatan melebihi batas sel Excel"
                 cell.value, cell.data_type = text, "s"
             simpan(book, path)
+            if terlogout:
+                print(f"Sesi FASIH berakhir pada baris Excel {number}. Progres disimpan; proses dihentikan. Login ulang sebelum menjalankan kembali.")
+                break
             for tab in browser.pages:
                 if tab not in tabs_sebelum and not tab.is_closed():
                     tab.close()
