@@ -1,0 +1,8 @@
+# Only reviewed source files are published.
+/*
+!/.gitignore
+!/fasih.py
+!/cek_jeda.py
+!/cek_sesi.py
+!/config.json
+!/install.bat

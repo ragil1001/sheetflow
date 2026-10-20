@@ -1,0 +1,14 @@
+{
+  "excel_file": "automasi.xlsx",
+  "sheet_name": "Sheet1",
+  "delay_min": 3,
+  "delay_max": 5,
+  "batch_min": 8,
+  "batch_max": 15,
+  "rest_min": 2,
+  "rest_max": 4,
+  "action_min": 0.25,
+  "action_max": 0.7,
+  "typing_min": 35,
+  "typing_max": 80
+}
