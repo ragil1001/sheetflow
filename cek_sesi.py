@@ -9,12 +9,16 @@ from unittest.mock import call, patch
 from camoufox.sync_api import Camoufox
 from openpyxl import Workbook, load_workbook
 from playwright.sync_api import Error, expect
-from fasih import FIELDS, PESAN_BOT, SELECTORS, buka_usaha, identitas, inputan, isi_remarks, main, pasang_refresh, pesan_galat, sesi, tab_survei, tunggu_kirim
+from fasih import FIELDS, PESAN_BOT, SELECTORS, buka_usaha, identitas, inputan, isi_remarks, jalankan, main, pasang_refresh, pesan_galat, sesi, tab_survei, tunggu_kirim
 
 pesan_bot = ("BOT-12345678", "Bot Detected", "Anda terdeteksi sebagai bot", "Terdeteksi bot",
              "Kami mendeteksi perilaku yang tidak wajar pada koneksi Anda", "Sistem kami mendeteksi koneksi Anda sebagai bot")
 assert all(PESAN_BOT.search(text) for text in pesan_bot)
 assert not PESAN_BOT.search("USAHA ROBOTIKA")
+for restart in (False, True):
+    with patch("fasih.jalankan", side_effect=[restart, True]) as run, patch("builtins.print"):
+        main()
+        assert run.call_args_list == ([call(), call(pemulihan=True)] if restart else [call()])
 
 with TemporaryDirectory() as temp, patch("fasih.hitung_mundur", side_effect=lambda page, waktu, label="Istirahat batch": page.wait_for_timeout(waktu)):
     path = Path(temp) / "sesi.json"
@@ -374,10 +378,15 @@ with TemporaryDirectory() as temp, patch("fasih.hitung_mundur", side_effect=lamb
                     context.route(pola, lambda r: r.fulfill(status=302, headers={"location": "https://sso.bps.go.id/login"}))
                     permintaan = []
                     context.route("**/app/assignment-detail/jangan-dibuka", lambda r: (permintaan.append(r.request.url), r.fulfill(body="Tidak boleh dibuka")))
+                    snapshot = root / ".fasih-profile" / "sesi.json"
+                    tab_tersimpan = json.loads(snapshot.read_text(encoding="utf-8"))["tab"]
                     with patch("fasih.__file__", str(root / "fasih.py")), patch("fasih.TIMEOUT", 1000), \
                          patch("fasih.Camoufox", return_value=nullcontext(context)), patch("builtins.input", return_value=""), \
                          patch("builtins.print") as output:
-                        main()
+                        assert jalankan() is True
+                    state = json.loads(snapshot.read_text(encoding="utf-8"))
+                    assert state["tab"] == tab_tersimpan, "SessionStorage FASIH tertimpa sessionStorage SSO"
+                    assert state["browser"]["cookies"] == context.cookies(), "Cookie terkini tidak disimpan sebelum restart"
                     assert not permintaan, "Skrip lanjut ke baris berikutnya setelah logout"
                     assert any("Progres disimpan; proses dihentikan" in str(c) for c in output.call_args_list)
                     assert not any("[SELESAI]" in str(c) for c in output.call_args_list)
@@ -386,7 +395,7 @@ with TemporaryDirectory() as temp, patch("fasih.hitung_mundur", side_effect=lamb
                     headers = list(data[0])
                     assert data[1][headers.index("status")] == "ERROR"
                     assert "Catatan operator\n" in data[1][headers.index("catatan")]
-                    assert "Dialihkan ke SSO BPS; perlu login manual" in data[1][headers.index("catatan")]
+                    assert "Dialihkan ke SSO BPS; sesi perlu diperiksa" in data[1][headers.index("catatan")]
                     assert data[2][headers.index("status")] == "TODO" and data[2][headers.index("catatan")] is None
                     book.close()
                     for tab in context.pages:
@@ -394,7 +403,30 @@ with TemporaryDirectory() as temp, patch("fasih.hitung_mundur", side_effect=lamb
                             tab.close()
                     context.unroute(pola)
                     context.unroute("**/app/assignment-detail/jangan-dibuka")
+                    # Pemulihan melanjutkan baris berikut, tanpa mengulang submit baris ERROR.
+                    with patch("fasih.__file__", str(root / "fasih.py")), patch("fasih.TIMEOUT", 1000), \
+                         patch("fasih.Camoufox", return_value=nullcontext(context)), patch("builtins.input") as prompt, \
+                         patch("builtins.print"):
+                        assert not jalankan(pemulihan=True)
+                        prompt.assert_not_called()
+                    book = load_workbook(root / "uji.xlsx")
+                    data = list(book["Sheet1"].values)
+                    headers = list(data[0])
+                    assert data[1][headers.index("status")] == "ERROR"
+                    assert data[2][headers.index("status")] == "NO_CHANGE"
+                    book.close()
                 context.route("**/app/surveys?*", lambda r: r.fulfill(status=302, headers={"location": "https://sso.bps.go.id/login"}))
+                book = load_workbook(root / "uji.xlsx")
+                book["Sheet1"].cell(3, headers.index("status") + 1, "TODO")
+                book.save(root / "uji.xlsx")
+                book.close()
+                with patch("fasih.__file__", str(root / "fasih.py")), patch("fasih.TIMEOUT", 1000), \
+                     patch("fasih.Camoufox", return_value=nullcontext(context)), patch("builtins.input") as prompt, \
+                     patch("fasih.simpan") as save, patch("builtins.print") as output:
+                    assert not jalankan(pemulihan=True)
+                    prompt.assert_not_called()
+                    save.assert_not_called()
+                    assert any("belum pulih setelah restart" in str(c) for c in output.call_args_list)
                 with patch("fasih.__file__", str(root / "fasih.py")), patch("fasih.TIMEOUT", 5000), \
                      patch("fasih.Camoufox", return_value=nullcontext(context)) as launch, patch("builtins.input", side_effect=EOFError("Login manual")) as prompt, \
                      patch("fasih.simpan") as simpan, patch("builtins.print") as output:

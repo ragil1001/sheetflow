@@ -166,7 +166,10 @@ def pesan_galat(page):
 
 def sesi(browser, page, path, simpan=False):
     if simpan:
-        data = {"browser": browser.storage_state(indexed_db=True), "tab": page.evaluate("() => ({...sessionStorage})")}
+        tab = json.loads(path.read_text(encoding="utf-8"))["tab"] if path.exists() else {}
+        if page.url.startswith("https://fasih-sm.bps.go.id/"):
+            tab = page.evaluate("() => ({...sessionStorage})")
+        data = {"browser": browser.storage_state(indexed_db=True), "tab": tab}
         temp = path.with_suffix(".tmp.json")
         temp.write_text(json.dumps(data), encoding="utf-8")
         temp.replace(path)
@@ -227,7 +230,7 @@ def hitung_mundur(page, waktu, label="Istirahat batch"):
             return
         page.wait_for_timeout(min(1000, tersisa * 1000))
 
-def main():
+def jalankan(pemulihan=False):
     root = Path(__file__).resolve().parent
     cfg = json.loads((root / "config.json").read_text(encoding="utf-8"))
     for key in ("delay", "batch", "rest", "action", "typing"):
@@ -280,11 +283,20 @@ def main():
         print("[SESI] Memeriksa akses halaman Survei...", flush=True)
         page.goto("https://fasih-sm.bps.go.id/app/surveys?page=0&perPage=10&layout=list", wait_until="commit")
         expect(page.locator("body")).to_be_visible(timeout=TIMEOUT)
+        if pemulihan:
+            try:
+                page.wait_for_url("**/app/surveys?*", wait_until="domcontentloaded", timeout=TIMEOUT)
+            except Error:
+                print("[SESI] Akses Survei belum pulih setelah restart. Proses dihentikan; login ulang diperlukan.", flush=True)
+                book.close()
+                return False
         if headless and page.url.startswith("https://sso.bps.go.id/"):
+            sesi(browser, page, root / ".fasih-profile" / "sesi.json", simpan=True)
             print("Sesi FASIH berakhir. Proses dihentikan; login ulang sebelum menjalankan kembali.", flush=True)
             book.close()
-            return
-        input("Pemeriksaan awal selesai; tekan Enter untuk mulai... " if headless else "Setelah halaman Survei terbuka, tekan Enter di terminal... ")
+            return not pemulihan
+        if not pemulihan:
+            input("Pemeriksaan awal selesai; tekan Enter untuk mulai... " if headless else "Setelah halaman Survei terbuka, tekan Enter di terminal... ")
         page = tab_survei(browser)
         page.wait_for_url("**/app/surveys?*", wait_until="commit")
         sesi(browser, page, root / ".fasih-profile" / "sesi.json", simpan=True)
@@ -394,7 +406,7 @@ def main():
                 kode = re.search(r"\bBOT-\d+\b", error_text)
                 if any(tab.url.startswith("https://sso.bps.go.id/") for tab in (page, assignment)):
                     terlogout = True
-                    note = tahap + " | Dialihkan ke SSO BPS; perlu login manual."
+                    note = tahap + " | Dialihkan ke SSO BPS; sesi perlu diperiksa."
                 elif kode:
                     note = tahap + " | Akses diblokir sebagai bot: " + kode[0]
                 elif tahap.startswith("BLOK II:") and "paragraph: Tidak ada data" in error_text:
@@ -411,7 +423,8 @@ def main():
             if note:
                 print("  [CATATAN] " + note.splitlines()[0], flush=True)
             if terlogout:
-                print(f"Sesi FASIH berakhir pada baris Excel {number}. Progres disimpan; proses dihentikan. Login ulang sebelum menjalankan kembali.", flush=True)
+                sesi(browser, page, root / ".fasih-profile" / "sesi.json", simpan=True)
+                print(f"Sesi FASIH berakhir pada baris Excel {number}. Progres disimpan; proses dihentikan" + ("; mencoba restart browser." if not pemulihan else "; login ulang diperlukan."), flush=True)
                 break
             for tab in browser.pages:
                 if tab not in tabs_sebelum and not tab.is_closed():
@@ -429,6 +442,12 @@ def main():
         else:
             print(f"[SELESAI] SUCCESS={hasil['SUCCESS']}, NO_CHANGE={hasil['NO_CHANGE']}, ERROR={hasil['ERROR']}.", flush=True)
     book.close()
+    return terlogout and not pemulihan
+
+def main():
+    if jalankan():
+        print("[SESI] Menutup dan membuka ulang Camoufox sekali dengan profil/cookie yang sama. Baris terputus tetap ERROR untuk diperiksa.", flush=True)
+        jalankan(pemulihan=True)
 
 if __name__ == "__main__":
     main()
