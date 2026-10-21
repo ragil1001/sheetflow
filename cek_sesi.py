@@ -19,6 +19,9 @@ for restart in (False, True):
     with patch("fasih.jalankan", side_effect=[restart, True]) as run, patch("builtins.print"):
         main()
         assert run.call_args_list == ([call(), call(pemulihan=True)] if restart else [call()])
+with patch("fasih.jalankan", side_effect=[222, False]) as run, patch("builtins.print"):
+    main()
+    assert run.call_args_list == [call(), call(pemulihan=True, ulang_baris=222)]
 
 with TemporaryDirectory() as temp, patch("fasih.hitung_mundur", side_effect=lambda page, waktu, label="Istirahat batch": page.wait_for_timeout(waktu)):
     path = Path(temp) / "sesi.json"
@@ -346,7 +349,7 @@ with TemporaryDirectory() as temp, patch("fasih.hitung_mundur", side_effect=lamb
                     assert pesan_terminal.count("  [HASIL] NO_CHANGE; progres disimpan.") == 2
                     assert pesan_terminal.count("  [HASIL] ERROR; progres disimpan.") == 3
                     assert "  [CATATAN] Galat validasi Kirim: Validasi uji" in pesan_terminal
-                    assert pesan_terminal[-1] == "[SELESAI] SUCCESS=0, NO_CHANGE=2, ERROR=3."
+                    assert pesan_terminal[-1] == "[SELESAI] SUCCESS=0, NO_CHANGE=2, ERROR=3." or pesan_terminal[-1].startswith("[STOP]")
                 book = load_workbook(root / "uji.xlsx")
                 data = list(book["Sheet1"].values)
                 headers = list(data[0])
@@ -365,6 +368,34 @@ with TemporaryDirectory() as temp, patch("fasih.hitung_mundur", side_effect=lamb
                 context.cookies()
                 assert context.pages == [assignment], [tab.url for tab in context.pages]
                 book.close()
+                for panne in ("bot", "down"):
+                    book = Workbook()
+                    sheet = book.active
+                    sheet.title = "Sheet1"
+                    sheet.append(["id_fasih", "target_usaha", *FIELDS, "status"])
+                    sheet.append([panne, "USAHA BERIKUTNYA", *([None] * len(FIELDS)), "TODO"])
+                    sheet.append(["suivant", "USAHA BERIKUTNYA", *([None] * len(FIELDS)), "TODO"])
+                    book.save(root / "uji.xlsx")
+                    book.close()
+                    route = "**/app/assignment-detail/" + panne
+                    context.route(route, lambda r: r.fulfill(content_type="text/html", body="<p>Bot Detected</p>" if panne == "bot" else "<p>Service unavailable</p>"))
+                    with patch("fasih.__file__", str(root / "fasih.py")), patch("fasih.TIMEOUT", 500), \
+                         patch("fasih.Camoufox", return_value=nullcontext(context)), patch("builtins.input", return_value=""), patch("builtins.print") as output:
+                        result = jalankan()
+                        assert result == (2 if panne == "bot" else False), (result, output.call_args_list)
+                    book = load_workbook(root / "uji.xlsx")
+                    assert book["Sheet1"].cell(3, len(FIELDS) + 3).value == "TODO", "Server gagal tetapi baris berikut ikut diproses"
+                    book.close()
+                    assert len(context.pages) <= 1, "Tab gagal tertinggal"
+                    context.unroute(route)
+                    if panne == "bot":
+                        with patch("fasih.__file__", str(root / "fasih.py")), patch("fasih.TIMEOUT", 1000), \
+                             patch("fasih.Camoufox", return_value=nullcontext(context)), patch("builtins.input") as prompt, patch("builtins.print"):
+                            assert not jalankan(pemulihan=True, ulang_baris=2)
+                            prompt.assert_not_called()
+                        book = load_workbook(root / "uji.xlsx")
+                        assert book["Sheet1"].cell(2, len(FIELDS) + 3).value == "NO_CHANGE", "Assignment BOT tidak dicoba ulang"
+                        book.close()
                 for lokasi in ("assignment-detail", "uji-form"):
                     book = Workbook()
                     sheet = book.active
