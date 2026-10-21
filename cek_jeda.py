@@ -24,6 +24,11 @@ with patch("fasih.monotonic", side_effect=[10, 10, 11, 12, 12.5]), patch("builti
         call(f"\rIstirahat batch: 00:{s:02d}", end="", flush=True) for s in (3, 2, 1, 0)
     ] + [call(" - lanjut.")]
 page.reset_mock()
+with patch("fasih.monotonic", side_effect=[10, 10, 11]), patch("builtins.print") as output:
+    hitung_mundur(page, 1000, "Menunggu hard refresh")
+    assert output.call_args_list == [call("\rMenunggu hard refresh: 00:01", end="", flush=True),
+                                     call("\rMenunggu hard refresh: 00:00", end="", flush=True), call(" - lanjut.")]
+page.reset_mock()
 with patch("fasih.monotonic", return_value=10), patch("builtins.print"):
     hitung_mundur(page, 0)
     page.wait_for_timeout.assert_not_called()

@@ -16,7 +16,7 @@ pesan_bot = ("BOT-12345678", "Bot Detected", "Anda terdeteksi sebagai bot", "Ter
 assert all(PESAN_BOT.search(text) for text in pesan_bot)
 assert not PESAN_BOT.search("USAHA ROBOTIKA")
 
-with TemporaryDirectory() as temp:
+with TemporaryDirectory() as temp, patch("fasih.hitung_mundur", side_effect=lambda page, waktu, label="Istirahat batch": page.wait_for_timeout(waktu)):
     path = Path(temp) / "sesi.json"
     for run in range(2):
         fingerprint = identitas(Path(temp) / "fingerprint.json")

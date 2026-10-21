@@ -187,7 +187,7 @@ def pasang_refresh(page):
     def ulang():
         print("  [REFRESH] Halaman meminta refresh; menunggu 30 detik.", flush=True)
         try:
-            page.wait_for_timeout(30000)
+            hitung_mundur(page, 30000, "Menunggu refresh")
             # ponytail: klik native menghindari auto-wait bersarang; langkah utama memeriksa pemulihan.
             refresh.evaluate_all("buttons => buttons.find(b => b.getClientRects().length && !b.disabled)?.click()")
         except Error:
@@ -195,7 +195,7 @@ def pasang_refresh(page):
     def hard_refresh(pesan):
         print("  [REFRESH] Deteksi BOT atau akses Edit gagal; menunggu 30 detik sebelum hard refresh.", flush=True)
         try:
-            page.wait_for_timeout(30000)
+            hitung_mundur(page, 30000, "Menunggu hard refresh")
             if pesan.is_visible():
                 print("  [REFRESH] Hard refresh melewati cache.", flush=True)
                 # ponytail: khusus Firefox/Camoufox; langkah utama memeriksa hasil reload.
@@ -216,12 +216,12 @@ def jeda(cfg, sisa):
         return random.uniform(cfg["rest_min"], cfg["rest_max"]) * 60000, random.randint(cfg["batch_min"], cfg["batch_max"])
     return random.uniform(cfg["delay_min"], cfg["delay_max"]) * 1000, sisa
 
-def hitung_mundur(page, waktu):
+def hitung_mundur(page, waktu, label="Istirahat batch"):
     akhir = monotonic() + waktu / 1000
     while True:
         tersisa = max(0, akhir - monotonic())
         menit, detik = divmod(ceil(tersisa), 60)
-        print(f"\rIstirahat batch: {menit:02d}:{detik:02d}", end="", flush=True)
+        print(f"\r{label}: {menit:02d}:{detik:02d}", end="", flush=True)
         if tersisa == 0:
             print(" - lanjut.")
             return
