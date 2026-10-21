@@ -8,8 +8,8 @@ from unittest import TestCase
 from unittest.mock import call, patch
 from camoufox.sync_api import Camoufox
 from openpyxl import Workbook, load_workbook
-from playwright.sync_api import expect
-from fasih import FIELDS, PESAN_BOT, SELECTORS, buka_usaha, identitas, inputan, isi_remarks, main, pasang_refresh, pesan_galat, sesi, tab_survei
+from playwright.sync_api import Error, expect
+from fasih import FIELDS, PESAN_BOT, SELECTORS, buka_usaha, identitas, inputan, isi_remarks, main, pasang_refresh, pesan_galat, sesi, tab_survei, tunggu_kirim
 
 pesan_bot = ("BOT-12345678", "Bot Detected", "Anda terdeteksi sebagai bot", "Terdeteksi bot",
              "Kami mendeteksi perilaku yang tidak wajar pada koneksi Anda", "Sistem kami mendeteksi koneksi Anda sebagai bot")
@@ -58,8 +58,8 @@ with TemporaryDirectory() as temp:
                             tab.wait_for_load_state("load")
                             assert permintaan.count("/asset.js") == 2, "Hard refresh tidak melewati cache"
                             assert tab.evaluate("() => [localStorage.getItem('uji'), sessionStorage.getItem('uji'), document.cookie]") == ["tetap", "tetap", "uji=tetap"]
-                            for text in pesan_bot:
-                                jawaban = [f'<p>{text}</p>', normal]
+                            for text in ("Gagal Mendapatkan Akses Approve/Reject/Edit Assignment", *pesan_bot):
+                                jawaban = [text if text == "Bot Detected" else f'<p>{text}</p>', normal]
                                 pasang_refresh(tab)
                                 tab.goto(url)
                                 with patch.object(tab, "wait_for_timeout") as tunggu:
@@ -86,6 +86,13 @@ with TemporaryDirectory() as temp:
                                         expect(tab.get_by_role("button", name="Ringkasan", exact=True)).to_be_visible(timeout=1000)
                                 tunggu.assert_called_once_with(30000)
                             assert permintaan.count("/") == jumlah + 1, "Hard refresh diulang tanpa batas"
+                            jawaban = ["Bot Detected"]
+                            pasang_refresh(tab)
+                            tab.goto(url)
+                            with patch.object(tab, "wait_for_timeout"), patch.object(tab, "evaluate", side_effect=Error("Execution context was destroyed")), patch("builtins.print") as output:
+                                with TestCase().assertRaises(AssertionError):
+                                    expect(tab.get_by_role("button", name="Ringkasan", exact=True)).to_be_visible(timeout=300)
+                            assert any("Hard refresh gagal" in str(c) for c in output.call_args_list)
                     finally:
                         server.shutdown()
                         worker.join()
@@ -158,6 +165,17 @@ with TemporaryDirectory() as temp:
                     page.get_by_role("button", name="CATATAN", exact=True).click(timeout=10000)
                     tunggu.assert_called_once_with(30000)
                 assert page.get_by_role("button", name="CATATAN", exact=True).get_attribute("data-clicked") == "1"
+                for html in ('<button disabled>Refresh Page</button>', '<button onclick="this.dataset.clicked=\'true\'">Refresh Page</button>'):
+                    page.set_content(html)
+                    with patch.object(page, "wait_for_timeout"):
+                        with TestCase().assertRaises(AssertionError) as gagal:
+                            expect(page.get_by_role("button", name="Ringkasan", exact=True)).to_be_visible(timeout=300)
+                    assert "timeout 300ms" in str(gagal.exception), "Kegagalan refresh keluar dari timeout langkah utama"
+                page.set_content('<button>Refresh Page</button>')
+                with patch.object(page, "wait_for_timeout"), patch("playwright.sync_api.Locator.evaluate_all", side_effect=Error("Execution context was destroyed")), patch("builtins.print") as output:
+                    with TestCase().assertRaises(AssertionError):
+                        expect(page.get_by_role("button", name="Ringkasan", exact=True)).to_be_visible(timeout=300)
+                assert any("refresh gagal" in str(c) for c in output.call_args_list)
                 kartu_usaha = '<div data-nested-view="true" onclick="this.dataset.clicked=\'true\'; document.querySelector(\'#nama\').hidden=false"><span>USAHA CONTOH </span></div>'
                 wadah_nama = '<div class="tw:flex tw:gap-2 tw:rounded-lg tw:py-2 tw:@lg/form:flex-row tw:flex-col"><div>Nama usaha/perusahaan</div>'
                 for target, nama, suffix in (("USAHA CONTOH <PEMILIK A>", '<input readonly value="USAHA CONTOH (PEMILIK A)">', "1002"),
@@ -261,6 +279,17 @@ with TemporaryDirectory() as temp:
                     assert kirim.get_attribute("data-clicked") is None
                     kirim.click()
                     assert kirim.get_attribute("data-clicked") == "true"
+                page.set_content('<p hidden>Failed presigned URL</p><p>Konfirmasi Kirim</p>')
+                tunggu_kirim(page, page.get_by_text("Konfirmasi Kirim", exact=True))
+                for text in ("Failed presigned URL", "Gagal mendapatkan pre-signed URL", "Presigned URL request failed"):
+                    page.set_content('<button onclick="this.dataset.clicked=\'true\'">Kirim</button><p hidden></p>')
+                    page.evaluate("text => setTimeout(() => { const p=document.querySelector('p'); p.textContent=text; p.hidden=false; }, 50)", text)
+                    with patch("fasih.TIMEOUT", 1000), TestCase().assertRaisesRegex(AssertionError, "kesalahan presigned URL"):
+                        tunggu_kirim(page, page.get_by_text("Konfirmasi Kirim", exact=True))
+                    assert page.get_by_role("button", name="Kirim", exact=True).get_attribute("data-clicked") is None
+                page.set_content('<p>Failed presigned URL</p>')
+                with TestCase().assertRaisesRegex(AssertionError, "presigned URL"):
+                    pesan_galat(page)
             page.close()
             page = assignment
             page.bring_to_front()
@@ -300,11 +329,20 @@ with TemporaryDirectory() as temp:
                     '<button onclick="this.parentElement.hidden=true">Dismiss</button></section><button>Kirim</button>')))
                 with patch("fasih.__file__", str(root / "fasih.py")), patch("fasih.TIMEOUT", 1000), patch("fasih.TIMEOUT_CARI_USAHA", 100), \
                      patch("fasih.Camoufox", return_value=nullcontext(context)), patch("builtins.input", return_value=""), \
-                     patch("fasih.isi_remarks", wraps=isi_remarks) as remarks, patch("fasih.pesan_galat", return_value="Validasi uji") as validasi:
+                     patch("fasih.isi_remarks", wraps=isi_remarks) as remarks, patch("fasih.pesan_galat", return_value="Validasi uji") as validasi, \
+                     patch("builtins.print") as output:
                     main()
                     assert remarks.call_count == 2
                     assert all(c.args[2] == "Hasil konfirmasi" for c in remarks.call_args_list)
                     assert validasi.call_count == 1, "Form yang dimuat ulang diteruskan ke Kirim"
+                    pesan_terminal = [c.args[0] for c in output.call_args_list]
+                    assert any("[MULAI] 5 baris; headless=" in text for text in pesan_terminal)
+                    assert "[SESI] Halaman Survei terbuka. Mulai memeriksa assignment." in pesan_terminal
+                    assert "[1/5] Baris Excel 2: USAHA CONTOH TIGA" in pesan_terminal
+                    assert pesan_terminal.count("  [HASIL] NO_CHANGE; progres disimpan.") == 2
+                    assert pesan_terminal.count("  [HASIL] ERROR; progres disimpan.") == 3
+                    assert "  [CATATAN] Galat validasi Kirim: Validasi uji" in pesan_terminal
+                    assert pesan_terminal[-1] == "[SELESAI] SUCCESS=0, NO_CHANGE=2, ERROR=3."
                 book = load_workbook(root / "uji.xlsx")
                 data = list(book["Sheet1"].values)
                 headers = list(data[0])
@@ -319,9 +357,9 @@ with TemporaryDirectory() as temp:
                 assert data[4][headers.index("status")] == "NO_CHANGE"
                 assert data[5][headers.index("status")] == "ERROR"
                 assert data[5][headers.index("catatan")], "Reload saat mengedit tidak dicatat"
-                assert assignment.evaluate("localStorage.getItem('remarks_gaji#2099')") == "Hasil konfirmasi"
-                assert assignment.evaluate("localStorage.getItem('remarks_pekerja#2099')") == "Hasil konfirmasi"
-                assert context.pages == [assignment]
+                assignment.wait_for_function("() => ['gaji','pekerja'].every(k => localStorage.getItem('remarks_'+k+'#2099') === 'Hasil konfirmasi')", timeout=5000)
+                context.cookies()
+                assert context.pages == [assignment], [tab.url for tab in context.pages]
                 book.close()
                 for lokasi in ("assignment-detail", "uji-form"):
                     book = Workbook()
@@ -342,6 +380,7 @@ with TemporaryDirectory() as temp:
                         main()
                     assert not permintaan, "Skrip lanjut ke baris berikutnya setelah logout"
                     assert any("Progres disimpan; proses dihentikan" in str(c) for c in output.call_args_list)
+                    assert not any("[SELESAI]" in str(c) for c in output.call_args_list)
                     book = load_workbook(root / "uji.xlsx")
                     data = list(book["Sheet1"].values)
                     headers = list(data[0])
@@ -356,11 +395,15 @@ with TemporaryDirectory() as temp:
                     context.unroute(pola)
                     context.unroute("**/app/assignment-detail/jangan-dibuka")
                 context.route("**/app/surveys?*", lambda r: r.fulfill(status=302, headers={"location": "https://sso.bps.go.id/login"}))
-                with patch("fasih.__file__", str(root / "fasih.py")), patch("fasih.TIMEOUT", 1000), \
-                     patch("fasih.Camoufox", return_value=nullcontext(context)), patch("builtins.input") as prompt, \
+                with patch("fasih.__file__", str(root / "fasih.py")), patch("fasih.TIMEOUT", 5000), \
+                     patch("fasih.Camoufox", return_value=nullcontext(context)) as launch, patch("builtins.input", side_effect=EOFError("Login manual")) as prompt, \
                      patch("fasih.simpan") as simpan, patch("builtins.print") as output:
-                    main()
-                prompt.assert_not_called()
+                    with suppress(EOFError):
+                        main()
                 simpan.assert_not_called()
-                assert any("Sesi FASIH berakhir" in str(c) for c in output.call_args_list)
+                if launch.call_args.kwargs["headless"]:
+                    prompt.assert_not_called()
+                    assert any("Sesi FASIH berakhir" in str(c) for c in output.call_args_list)
+                else:
+                    prompt.assert_called_once()
             context.close()

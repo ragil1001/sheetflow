@@ -139,9 +139,14 @@ def identitas(path):
     temp.replace(path)
     return data
 
+def tunggu_kirim(page, tujuan):
+    gagal = page.get_by_text(re.compile(r"\bpre[\s_-]?signed[\s_-]*url\b", re.I)).filter(visible=True).first
+    expect(tujuan.filter(visible=True).or_(gagal).first).to_be_visible(timeout=TIMEOUT)
+    assert not gagal.is_visible(), "Kirim gagal: FASIH menampilkan kesalahan presigned URL; hasil kirim belum dipastikan"
+
 def pesan_galat(page):
     modal = page.locator(SELECTORS["modal"])
-    expect(modal).to_be_visible(timeout=TIMEOUT)
+    tunggu_kirim(page, modal)
     tombol = modal.get_by_role("button", name=re.compile(r"^Galat\s+[1-9]\d*\s+Perlu diperbaiki$"))
     if not tombol.count():
         return ""
@@ -178,19 +183,31 @@ def tab_survei(browser):
 def pasang_refresh(page):
     refresh = page.get_by_role("button", name="Refresh Page", exact=True)
     bot = page.get_by_text(PESAN_BOT).filter(visible=True).first
+    akses = page.get_by_text("Gagal Mendapatkan Akses Approve/Reject/Edit Assignment", exact=True).filter(visible=True).first
     def ulang():
-        page.wait_for_timeout(30000)
-        if refresh.is_visible():
-            refresh.click(no_wait_after=True)
-    def hard_refresh():
-        page.wait_for_timeout(30000)
-        if bot.is_visible():
-            with page.expect_navigation(wait_until="commit", timeout=TIMEOUT - 30000):
-                # ponytail: khusus Firefox/Camoufox; browser lain perlu API bypass cache sendiri.
-                page.evaluate("() => { setTimeout(() => location.reload(true), 0); }")
+        print("  [REFRESH] Halaman meminta refresh; menunggu 30 detik.", flush=True)
+        try:
+            page.wait_for_timeout(30000)
+            # ponytail: klik native menghindari auto-wait bersarang; langkah utama memeriksa pemulihan.
+            refresh.evaluate_all("buttons => buttons.find(b => b.getClientRects().length && !b.disabled)?.click()")
+        except Error:
+            print("  [REFRESH] Halaman berubah/tertutup atau refresh gagal; langkah aktif akan memeriksa hasilnya.", flush=True)
+    def hard_refresh(pesan):
+        print("  [REFRESH] Deteksi BOT atau akses Edit gagal; menunggu 30 detik sebelum hard refresh.", flush=True)
+        try:
+            page.wait_for_timeout(30000)
+            if pesan.is_visible():
+                print("  [REFRESH] Hard refresh melewati cache.", flush=True)
+                # ponytail: khusus Firefox/Camoufox; langkah utama memeriksa hasil reload.
+                page.evaluate("() => location.reload(true)")
+        except Error:
+            print("  [REFRESH] Hard refresh gagal; langkah aktif akan memeriksa hasilnya.", flush=True)
     page.remove_locator_handler(refresh)
     page.remove_locator_handler(bot)
-    page.add_locator_handler(bot, hard_refresh, times=1)
+    page.remove_locator_handler(akses)
+    # Pesan bisa cocok ke body; jangan menunggu elemen body lama menghilang setelah reload.
+    page.add_locator_handler(bot, hard_refresh, times=1, no_wait_after=True)
+    page.add_locator_handler(akses, hard_refresh, times=1, no_wait_after=True)
     page.add_locator_handler(refresh, ulang, no_wait_after=True)
 
 def jeda(cfg, sisa):
@@ -237,6 +254,8 @@ def main():
         assert all(v is None or v == v.to_integral_value() for k, v in values.items() if k.startswith("tk_"))
         rows.append((number, row, values))
     if "--cek-excel" in sys.argv or not rows:
+        if not rows and "--cek-excel" not in sys.argv:
+            print("Tidak ada baris kosong/TODO/RETRY untuk diproses.", flush=True)
         book.close()
         return
     status = headers.index("status") + 1 if "status" in headers else sheet.max_column + 1
@@ -248,7 +267,8 @@ def main():
     with path.open("r+b"):
         pass
     fingerprint = identitas(root / ".fasih-profile" / "fingerprint.json")
-    headless = True
+    headless = False
+    print(f"[MULAI] {len(rows)} baris; headless={headless}. Membuka browser dan memuat sesi tersimpan.", flush=True)
     with Camoufox(persistent_context=True, user_data_dir=str(root / ".fasih-profile"), fingerprint=fingerprint, i_know_what_im_doing=True, headless=headless, humanize=True, os="windows", locale="id-ID", slow_mo=random.uniform(cfg["action_min"], cfg["action_max"]) * 1000, timeout=TIMEOUT) as browser:
         browser.set_default_timeout(TIMEOUT)
         browser.set_default_navigation_timeout(TIMEOUT)
@@ -257,18 +277,22 @@ def main():
             pasang_refresh(tab)
         page = browser.pages[0] if browser.pages else browser.new_page()
         sesi(browser, page, root / ".fasih-profile" / "sesi.json")
+        print("[SESI] Memeriksa akses halaman Survei...", flush=True)
         page.goto("https://fasih-sm.bps.go.id/app/surveys?page=0&perPage=10&layout=list", wait_until="commit")
         expect(page.locator("body")).to_be_visible(timeout=TIMEOUT)
         if headless and page.url.startswith("https://sso.bps.go.id/"):
-            print("Sesi FASIH berakhir. Proses dihentikan; login ulang sebelum menjalankan kembali.")
+            print("Sesi FASIH berakhir. Proses dihentikan; login ulang sebelum menjalankan kembali.", flush=True)
             book.close()
             return
-        input("Setelah halaman Survei terbuka, tekan Enter di terminal... ")
+        input("Pemeriksaan awal selesai; tekan Enter untuk mulai... " if headless else "Setelah halaman Survei terbuka, tekan Enter di terminal... ")
         page = tab_survei(browser)
         page.wait_for_url("**/app/surveys?*", wait_until="commit")
         sesi(browser, page, root / ".fasih-profile" / "sesi.json", simpan=True)
+        print("[SESI] Halaman Survei terbuka. Mulai memeriksa assignment.", flush=True)
+        hasil = dict.fromkeys(("SUCCESS", "NO_CHANGE", "ERROR"), 0)
         sisa = random.randint(cfg["batch_min"], cfg["batch_max"])
         for index, (number, row, values) in enumerate(rows):
+            print(f"[{index + 1}/{len(rows)}] Baris Excel {number}: {row['target_usaha']}", flush=True)
             sheet.cell(number, status, "ERROR")
             simpan(book, path)
             assignment = page
@@ -276,18 +300,22 @@ def main():
             result, note = "ERROR", ""
             terlogout = False
             tahap = "Membuka assignment detail"
+            print("  " + tahap, flush=True)
             try:
                 pasang_refresh(page)
                 page.goto("https://fasih-sm.bps.go.id/app/assignment-detail/" + quote(row["id_fasih"], safe=""), wait_until="commit")
                 tahap = "Membuka tab Review"
+                print("  " + tahap, flush=True)
                 review = assignment.get_by_role("button", name="Review", exact=True)
                 expect(review).to_be_visible(timeout=TIMEOUT)
                 with assignment.expect_popup(timeout=TIMEOUT) as popup:
                     review.click(no_wait_after=True)
                 page = popup.value
                 tahap = "Menunggu Ringkasan"
+                print("  " + tahap, flush=True)
                 expect(page.get_by_role("button", name="Ringkasan", exact=True)).to_be_visible(timeout=TIMEOUT)
                 tahap = "Menunggu Revoke/Edit"
+                print("  " + tahap, flush=True)
                 revoke, edit = page.locator(SELECTORS["revoke"]), page.locator(SELECTORS["edit"])
                 expect(revoke.or_(edit).first).to_be_visible(timeout=TIMEOUT)
                 changed = revoke.is_visible()
@@ -296,17 +324,20 @@ def main():
                     revoke.click()
                     page.locator(SELECTORS["konfirmasi_revoke"]).click()
                 tahap = "Membuka Edit"
+                print("  " + tahap, flush=True)
                 edit.click(no_wait_after=True)
                 expect(edit).to_be_hidden(timeout=TIMEOUT)
                 tahap = "Membuka BLOK II"
                 page.locator(SELECTORS["blok_ii"]).click()
                 tahap = "BLOK II: membuka usaha " + row["target_usaha"]
+                print("  " + tahap, flush=True)
                 buka_usaha(page, row["target_usaha"])
                 dokumen = page.evaluate("performance.timeOrigin")
                 for column, label in FIELDS.items():
                     if values[column] is None:
                         continue
                     tahap = "Mencari/mengisi " + label
+                    print("  " + tahap, flush=True)
                     field = inputan(page, label)
                     expect(field).to_have_count(1, timeout=TIMEOUT)
                     berbeda = not field.input_value().strip() or angka(field.input_value()) != values[column]
@@ -318,8 +349,10 @@ def main():
                     assert angka(field.input_value()) == values[column], "Nilai web tidak sesuai Excel"
                     if berbeda and (row.get("remarks") or "").strip():
                         tahap = "Menyimpan remarks pada " + label
+                        print("  " + tahap, flush=True)
                         isi_remarks(page, field, row["remarks"])
                 tahap = "CATATAN: memeriksa switch anomali"
+                print("  " + tahap, flush=True)
                 page.locator(SELECTORS["catatan"]).click()
                 switch = page.locator(SELECTORS["switch"])
                 expect(switch).to_have_count(1, timeout=TIMEOUT)
@@ -330,6 +363,7 @@ def main():
                 assert page.evaluate("performance.timeOrigin") == dokumen, "Halaman dimuat ulang saat mengedit; periksa ulang perubahan sebelum retry"
                 if changed:
                     tahap = "Kirim: membuka dan membaca validasi"
+                    print("  " + tahap, flush=True)
                     page.get_by_role("button", name="Kirim", exact=True).click()
                     detail = pesan_galat(page)
                     if detail:
@@ -340,11 +374,12 @@ def main():
                         assert page.evaluate("performance.timeOrigin") == dokumen, "Halaman dimuat ulang saat validasi; periksa ulang perubahan sebelum retry"
                         tahap = "Kirim: menunggu konfirmasi"
                         page.locator(SELECTORS["modal"]).get_by_role("button", name="Kirim", exact=True).click()
-                        expect(page.get_by_text("Konfirmasi Kirim", exact=True)).to_be_visible(timeout=TIMEOUT)
+                        tunggu_kirim(page, page.get_by_text("Konfirmasi Kirim", exact=True))
                         assert page.evaluate("performance.timeOrigin") == dokumen, "Halaman dimuat ulang sebelum konfirmasi; hasil kirim perlu diperiksa sebelum retry"
                         tahap = "Konfirmasi Kirim; hasil kirim belum dipastikan"
+                        print("  " + tahap, flush=True)
                         page.get_by_role("button", name="Konfirmasi", exact=True).click()
-                        expect(page.get_by_text("Assignment Berhasil DisubmitPerubahan Anda berhasil disimpan.", exact=True)).to_be_visible(timeout=TIMEOUT)
+                        tunggu_kirim(page, page.get_by_text("Assignment Berhasil DisubmitPerubahan Anda berhasil disimpan.", exact=True))
                         assert page.evaluate("performance.timeOrigin") == dokumen, "Halaman dimuat ulang saat konfirmasi; hasil kirim perlu diperiksa sebelum retry"
                         result = "SUCCESS"
                         tahap = "Kirim berhasil; menutup konfirmasi sukses"
@@ -371,8 +406,12 @@ def main():
                 assert len(text) <= 32767, "Catatan melebihi batas sel Excel"
                 cell.value, cell.data_type = text, "s"
             simpan(book, path)
+            hasil[result] += 1
+            print(f"  [HASIL] {result}; progres disimpan.", flush=True)
+            if note:
+                print("  [CATATAN] " + note.splitlines()[0], flush=True)
             if terlogout:
-                print(f"Sesi FASIH berakhir pada baris Excel {number}. Progres disimpan; proses dihentikan. Login ulang sebelum menjalankan kembali.")
+                print(f"Sesi FASIH berakhir pada baris Excel {number}. Progres disimpan; proses dihentikan. Login ulang sebelum menjalankan kembali.", flush=True)
                 break
             for tab in browser.pages:
                 if tab not in tabs_sebelum and not tab.is_closed():
@@ -385,7 +424,10 @@ def main():
                 if istirahat:
                     hitung_mundur(page, waktu)
                 else:
+                    print(f"  Jeda {waktu / 1000:.1f} detik sebelum baris berikutnya.", flush=True)
                     page.wait_for_timeout(waktu)
+        else:
+            print(f"[SELESAI] SUCCESS={hasil['SUCCESS']}, NO_CHANGE={hasil['NO_CHANGE']}, ERROR={hasil['ERROR']}.", flush=True)
     book.close()
 
 if __name__ == "__main__":
