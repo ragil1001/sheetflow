@@ -24,6 +24,7 @@ FIELDS = {
     "tk_tidak_dibayar": "Pekerja tidak dibayar",
     "upah_gaji": "Total upah dan gaji, serta jaminan sosial pegawai",
     "perbaikan_produksi": "Biaya produksi",
+    "perbaikan_biaya_pembelian": "Biaya pembelian barang yang terjual",
     "perbaikan_operasional": "Biaya operasional",
     "perbaikan_nonoperasional": "Biaya non-operasional",
     "perbaikan_pendapatan": "Nilai pendapatan barang dan jasa",
