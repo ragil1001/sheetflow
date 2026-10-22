@@ -73,7 +73,7 @@ with TemporaryDirectory() as temp, patch("fasih.hitung_mundur", side_effect=lamb
             edit.click()
             assert edit.get_attribute("data-clicked") == "true"
             if run == 0:
-                for html in ('<button>Refresh Page</button>', '<button disabled>Refresh Page</button>',
+                for html in ('<button>Refresh Page</button>', '<button disabled>Refresh Page</button>', '<div id="se2026_nested"><p>Bot Detected</p></div>',
                              '<p>Gagal Mendapatkan Akses Approve/Reject/Edit Assignment</p>', *('<p>' + text + '</p>' for text in pesan_bot)):
                     tab = context.new_page()
                     tab.set_content(html)
@@ -115,6 +115,13 @@ with TemporaryDirectory() as temp, patch("fasih.hitung_mundur", side_effect=lamb
                 buka_usaha(page, "USAHA SIAP")
                 page.set_content('<div id="se2026_nested"><div data-nested-view="true">USAHA SIAP</div></div><input id="nama_usaha_edit#1002" value="USAHA SIAP">')
                 buka_usaha(page, "USAHA SIAP")
+                for form in ("", '<input id="nama_usaha_edit#1002" value="">', nama_form("USAHA SIAP") * 2):
+                    page.set_content('<div id="se2026_nested"><div data-nested-view="true">USAHA SIAP</div></div>' + form)
+                    with patch("fasih.TIMEOUT", 100), TestCase().assertRaisesRegex(ValueError, "Nama usaha dalam form tidak dapat diverifikasi"):
+                        buka_usaha(page, "USAHA SIAP")
+                page.set_content('<div id="se2026_nested"><div data-nested-view="true">USAHA BOT-12345678</div></div>' + nama_form("USAHA BOT-12345678"))
+                buka_usaha(page, "USAHA BOT-12345678")
+                assert not page.is_closed(), "Teks kartu/nama usaha dianggap pesan BOT"
                 page.set_content('<div id="se2026_nested"><div data-nested-view="true"><div data-nested-view="true" '
                                  'onclick="this.dataset.clicked=\'true\'"><span>USAHA&nbsp;CONTOH  TIGA</span></div></div></div>' + nama_form("USAHA CONTOH TIGA"))
                 buka_usaha(page, "USAHA CONTOH TIGA")
@@ -218,6 +225,9 @@ with TemporaryDirectory() as temp, patch("fasih.hitung_mundur", side_effect=lamb
                 sheet.append(["tetap", "USAHA BERIKUTNYA", *[0 if k in ("tk_laki_laki", "upah_gaji") else None for k in FIELDS], "Tidak disalin", "TODO"])
                 sheet.append(["input-hilang", "USAHA BERIKUTNYA", *[1 if k == "perbaikan_produksi" else None for k in FIELDS], None, "TODO"])
                 sheet.append(["nama-berbeda", "USAHA timeout (PEMILIK A)", *([None] * len(FIELDS)), None, "TODO"])
+                sheet.append(["nama-hilang", "USAHA BERIKUTNYA", *([None] * len(FIELDS)), None, "TODO"])
+                sheet.append(["nama-kosong", "USAHA BERIKUTNYA", *([None] * len(FIELDS)), None, "TODO"])
+                sheet.append(["nama-bot-data", "USAHA BOT-12345678", *([None] * len(FIELDS)), None, "TODO"])
                 sheet.append(["sesudah-error", "USAHA BERIKUTNYA", *([None] * len(FIELDS)), None, "TODO"])
                 book.save(root / "uji.xlsx")
                 book.close()
@@ -236,12 +246,17 @@ with TemporaryDirectory() as temp, patch("fasih.hitung_mundur", side_effect=lamb
                     + '<section id="editor" hidden><textarea placeholder="Tambah catatan di sini..."></textarea>'
                     '<button onclick="localStorage.setItem(\'remarks_\'+document.body.dataset.field,document.querySelector(\'textarea\').value)">Simpan</button>'
                     '<button onclick="this.parentElement.hidden=true">Dismiss</button></section><button>Kirim</button>')))
-                context.route("**/uji-form/nama-berbeda", lambda r: r.fulfill(content_type="text/html", body=(
-                    '<button>Ringkasan</button><button onclick="this.hidden=true"><svg class="tabler-icon-edit" width="24" height="24"></svg></button>'
-                    '<div class="fasih-form-sidebar"><div title="SE2026 - L BLOK II">BLOK II</div></div>'
-                    '<div id="se2026_nested"><div data-nested-view="true">USAHA timeout</div></div>' + nama_form("USAHA timeout (PEMILIK B)"))))
+                def nama_bermasalah(route):
+                    kasus = route.request.url.rsplit("/", 1)[-1]
+                    kartu = "USAHA timeout" if kasus == "nama-berbeda" else "USAHA BOT-12345678" if kasus == "nama-bot-data" else "USAHA BERIKUTNYA"
+                    form = "" if kasus == "nama-hilang" else nama_form("" if kasus == "nama-kosong" else "USAHA timeout (PEMILIK B)")
+                    route.fulfill(content_type="text/html", body=(
+                        '<button>Ringkasan</button><button onclick="this.hidden=true"><svg class="tabler-icon-edit" width="24" height="24"></svg></button>'
+                        '<div class="fasih-form-sidebar"><div title="SE2026 - L BLOK II">BLOK II</div></div>'
+                        '<div id="se2026_nested"><div data-nested-view="true">' + kartu + '</div></div>' + form))
+                context.route("**/uji-form/nama-*", nama_bermasalah)
                 with patch("fasih.__file__", str(root / "fasih.py")), patch("fasih.TIMEOUT", 5000), patch("fasih.TIMEOUT_CARI_USAHA", 100), \
-                     patch("fasih.Camoufox", return_value=nullcontext(context)) as launch, patch("builtins.input", return_value=""), \
+                     patch("fasih.Camoufox", side_effect=[nullcontext(context)]) as launch, patch("builtins.input", return_value=""), \
                      patch("fasih.isi_remarks", wraps=isi_remarks) as remarks, patch("fasih.pesan_galat", return_value="Validasi uji") as validasi, \
                      patch("builtins.print") as output, patch("playwright.sync_api.Locator.press_sequentially", side_effect=AssertionError("Ketik lambat masih dipakai")):
                     main()
@@ -250,13 +265,14 @@ with TemporaryDirectory() as temp, patch("fasih.hitung_mundur", side_effect=lamb
                     assert all(c.args[2] == "Hasil konfirmasi" for c in remarks.call_args_list)
                     assert validasi.call_count == 1, "Input hilang diteruskan ke Kirim"
                     pesan_terminal = [c.args[0] for c in output.call_args_list]
-                    assert any("[MULAI] 7 baris; headless=" in text for text in pesan_terminal)
+                    assert any("[MULAI] 10 baris; headless=" in text for text in pesan_terminal)
                     assert "[SESI] Halaman Survei terbuka. Mulai memeriksa assignment." in pesan_terminal
-                    assert "[1/7] Baris Excel 2: USAHA CONTOH TIGA" in pesan_terminal
+                    assert "[1/10] Baris Excel 2: USAHA CONTOH TIGA" in pesan_terminal
                     assert pesan_terminal.count("  [HASIL] NO_CHANGE; progres disimpan.") == 3
-                    assert pesan_terminal.count("  [HASIL] ERROR; progres disimpan.") == 4
+                    assert pesan_terminal.count("  [HASIL] ERROR; progres disimpan.") == 7
                     assert "  [CATATAN] Galat validasi Kirim: Validasi uji" in pesan_terminal
-                    assert pesan_terminal[-1] == "[SELESAI] SUCCESS=0, NO_CHANGE=3, ERROR=4."
+                    assert pesan_terminal[-1] == "[SELESAI] SUCCESS=0, NO_CHANGE=3, ERROR=7."
+                    assert not any("[PULIH]" in text for text in pesan_terminal), "Nama usaha bermasalah memicu restart"
                     launch.assert_called_once()
                 book = load_workbook(root / "uji.xlsx")
                 data = list(book["Sheet1"].values)
@@ -274,11 +290,16 @@ with TemporaryDirectory() as temp, patch("fasih.hitung_mundur", side_effect=lamb
                 assert "Input tidak terlihat/unik setelah nama usaha muncul" in data[5][headers.index("catatan")]
                 assert "timeout" not in data[5][headers.index("catatan")].lower(), "Input hilang masih ditunggu"
                 assert data[6][headers.index("status")] == "ERROR" and "Nama usaha dalam form tidak sesuai" in data[6][headers.index("catatan")]
-                assert data[7][headers.index("status")] == "NO_CHANGE", "Error input/nama menghentikan baris selanjutnya"
+                assert "Nama form: USAHA timeout (PEMILIK B)" in data[6][headers.index("catatan")]
+                for row in data[7:9]:
+                    assert row[headers.index("status")] == "ERROR" and "Nama usaha dalam form tidak dapat diverifikasi" in row[headers.index("catatan")]
+                assert data[9][headers.index("status")] == "ERROR" and "Nama usaha dalam form tidak sesuai" in data[9][headers.index("catatan")]
+                assert data[10][headers.index("status")] == "NO_CHANGE", "Error input/nama menghentikan baris selanjutnya"
                 assignment.wait_for_function("() => ['gaji','pekerja'].every(k => localStorage.getItem('remarks_'+k+'#2099') === 'Hasil konfirmasi')", timeout=5000)
                 context.cookies()
                 assert context.pages == [assignment], [tab.url for tab in context.pages]
                 book.close()
+                context.unroute("**/uji-form/nama-*", nama_bermasalah)
                 for panne in ("bot", "down", "popup-bot", "popup-down", "refresh", "popup-refresh", "blok-bot", "nama-bot"):
                     book = Workbook()
                     sheet = book.active
@@ -322,7 +343,7 @@ with TemporaryDirectory() as temp, patch("fasih.hitung_mundur", side_effect=lamb
                     book = load_workbook(root / "uji.xlsx")
                     assert book["Sheet1"].cell(2, len(FIELDS) + 3).value == "NO_CHANGE", "Assignment gagal tidak dicoba ulang"
                     book.close()
-                for jawaban in ("timeout", "bot", "sukses"):
+                for jawaban in ("timeout", "bot", "presigned", "diterima-timeout", "diterima-bot", "sukses"):
                     book = Workbook()
                     sheet = book.active
                     sheet.title = "Sheet1"
@@ -331,30 +352,52 @@ with TemporaryDirectory() as temp, patch("fasih.hitung_mundur", side_effect=lamb
                     sheet.append(["lanjut-submit", "USAHA BERIKUTNYA", *([None] * len(FIELDS)), "TODO"])
                     book.save(root / "uji.xlsx")
                     book.close()
+                    kiriman = []
+                    def terima_kirim(route):
+                        kiriman.append(True)
+                        route.fulfill(body="ok")
+                    context.route("**/uji-kirim", terima_kirim)
                     html_form = ('<button>Ringkasan</button><button onclick="this.hidden=true"><svg class="tabler-icon-edit" width="24" height="24"></svg></button>'
                                  '<div class="fasih-form-sidebar"><div title="SE2026 - L BLOK II">BLOK II</div><div title="CATATAN">CATATAN</div></div>'
                                  '<div id="se2026_nested"><div data-nested-view="true">USAHA BERIKUTNYA</div></div>' + nama_form("USAHA BERIKUTNYA")
                                  + '<label>Pekerja laki-laki<input value="0"></label><div id="cek_anomali_button"><input role="switch" aria-checked="true"></div>'
                                  '<button onclick="this.hidden=true;document.querySelector(\'#modal\').hidden=false">Kirim</button>'
                                  '<section id="modal" hidden>' + modal + '<button onclick="document.querySelector(\'#konfirmasi\').hidden=false">Kirim</button></div></section>'
-                                 '<section id="konfirmasi" hidden><p>Konfirmasi Kirim</p><button onclick="localStorage.setItem(\'jumlah_kirim\',String(Number(localStorage.getItem(\'jumlah_kirim\')||0)+1));'
-                                 + ("document.querySelector('#selesai').hidden=false" if jawaban == "sukses" else "document.body.innerHTML='<p>Bot Detected</p>'" if jawaban == "bot" else "this.disabled=true")
+                                 '<section id="konfirmasi" hidden><p>Konfirmasi Kirim</p><button onclick="localStorage.setItem(\'jumlah_kirim\',String(Number(localStorage.getItem(\'jumlah_kirim\')||0)+1));fetch(\'/uji-kirim\').then(() => {'
+                                 + ("document.querySelector('#selesai').hidden=false" if jawaban == "sukses" else "document.body.innerHTML='<p>Bot Detected</p>'" if jawaban.endswith("bot") else "document.body.innerHTML='<p>Failed presigned URL</p>'" if jawaban == "presigned" else "this.disabled=true") + '})'
                                  + '">Konfirmasi</button></section><section id="selesai" hidden><p>Assignment Berhasil DisubmitPerubahan Anda berhasil disimpan.</p><button>Tetap di Halaman</button></section>')
-                    context.route("**/uji-form/submit", lambda r: r.fulfill(content_type="text/html", body=html_form))
+                    def hasil_kirim(route):
+                        html = html_form
+                        if kiriman and jawaban.startswith("diterima-"):
+                            html = html.replace('<button onclick="this.hidden=true"><svg class="tabler-icon-edit" width="24" height="24"></svg></button>', '<button onclick="document.body.dataset.revoke=\'true\'"><svg class="tabler-icon-rotate-clockwise" width="24" height="24"></svg></button>').replace('<label>Pekerja laki-laki<input value="0">', '<label>Pekerja laki-laki<input readonly value="1">')
+                        elif kiriman and (jawaban not in ("timeout", "bot") or len(kiriman) >= 2):
+                            html = html_form.replace("document.body.innerHTML='<p>Bot Detected</p>'" if jawaban == "bot" else "document.body.innerHTML='<p>Failed presigned URL</p>'" if jawaban == "presigned" else "this.disabled=true", "document.querySelector('#selesai').hidden=false")
+                            html = html.replace('<label>Pekerja laki-laki<input value="0">', '<label>Pekerja laki-laki<input value="1">')
+                        route.fulfill(content_type="text/html", body=html)
+                    context.route("**/uji-form/submit", hasil_kirim)
                     assignment = context.pages[0]
                     assignment.evaluate("localStorage.removeItem('jumlah_kirim')")
                     sesi(context, assignment, root / ".fasih-profile" / "sesi.json", simpan=True)
-                    with patch("fasih.__file__", str(root / "fasih.py")), patch("fasih.TIMEOUT", 5000), \
+                    with patch("fasih.__file__", str(root / "fasih.py")), patch("fasih.TIMEOUT", 1000), \
                          patch("fasih.Camoufox", return_value=nullcontext(context)), patch("builtins.input", return_value=""), patch("builtins.print") as output:
                         assert jalankan() is (jawaban != "sukses")
                     book = load_workbook(root / "uji.xlsx")
-                    assert book["Sheet1"].cell(2, len(FIELDS) + 3).value == ("SUCCESS" if jawaban == "sukses" else "ERROR"), (jawaban, output.call_args_list)
+                    assert book["Sheet1"].cell(2, len(FIELDS) + 3).value == ("SUCCESS" if jawaban == "sukses" else "RETRY"), (jawaban, output.call_args_list)
                     book.close()
-                    with patch("fasih.__file__", str(root / "fasih.py")), patch("fasih.TIMEOUT", 5000), \
-                         patch("fasih.Camoufox", return_value=nullcontext(context)), patch("builtins.print"):
-                        assert not jalankan(pemulihan=True)
-                    assert assignment.evaluate("localStorage.getItem('jumlah_kirim')") == "1", (jawaban, assignment.evaluate("localStorage.getItem('jumlah_kirim')"), output.call_args_list)
+                    for attempt in range(3):
+                        with patch("fasih.__file__", str(root / "fasih.py")), patch("fasih.TIMEOUT", 1000), \
+                             patch("fasih.Camoufox", return_value=nullcontext(context)), patch("builtins.print"):
+                            if not jalankan(pemulihan=True):
+                                break
+                    else:
+                        raise AssertionError("Kirim tidak selesai otomatis: " + jawaban)
+                    assert len(kiriman) == (3 if jawaban in ("timeout", "bot") else 2 if jawaban == "presigned" else 1), (jawaban, kiriman)
+                    book = load_workbook(root / "uji.xlsx")
+                    assert book["Sheet1"].cell(2, len(FIELDS) + 3).value == "SUCCESS", jawaban
+                    assert book["Sheet1"].cell(3, len(FIELDS) + 3).value == "NO_CHANGE"
+                    book.close()
                     context.unroute("**/uji-form/submit")
+                    context.unroute("**/uji-kirim", terima_kirim)
                     assignment = context.pages[0]
                 def tab_berlebih(tab):
                     for _ in range(4):

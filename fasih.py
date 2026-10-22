@@ -93,15 +93,23 @@ def buka_usaha(page, target):
     expect(card, "Kartu usaha tidak ditemukan: " + target).to_have_count(1, timeout=TIMEOUT_CARI_USAHA)
     name.first.click()
     nama = page.locator(SELECTORS["nama_usaha"])
-    expect(nama, "Wadah nama usaha setelah kartu dibuka tidak ditemukan").to_have_count(1, timeout=TIMEOUT)
-    field = nama.locator("input:visible").or_(nama.and_(page.locator("input:visible")))
-    if field.count():
-        expect(field).not_to_have_value(re.compile(r"^\s*$"), timeout=TIMEOUT)
-        cocok = pola_usaha(target).fullmatch(" ".join(field.input_value().split()))
-    else:
-        cocok = nama.get_by_text(pola_usaha(target)).count() == 1
+    try:
+        expect(nama).to_have_count(1, timeout=TIMEOUT)
+        field = nama.locator("input:visible").or_(nama.and_(page.locator("input:visible")))
+        if field.count():
+            expect(field).to_have_count(1, timeout=TIMEOUT)
+            expect(field).not_to_have_value(re.compile(r"^\s*$"), timeout=TIMEOUT)
+            terlihat = " ".join(field.input_value().split())
+            cocok = pola_usaha(target).fullmatch(terlihat)
+        else:
+            terlihat = " ".join(nama.inner_text().split())
+            cocok = nama.get_by_text(pola_usaha(target)).count() == 1
+    except AssertionError as error:
+        if page.is_closed():
+            raise
+        raise ValueError("Nama usaha dalam form tidak dapat diverifikasi: " + target) from error
     if not cocok:
-        raise ValueError("Nama usaha dalam form tidak sesuai target Excel: " + target)
+        raise ValueError("Nama usaha dalam form tidak sesuai target Excel: " + target + " | Nama form: " + terlihat)
 
 def isi_remarks(page, field, text):
     wadah = field.locator('xpath=ancestor::*[contains(@id, "#")][1]')
@@ -189,18 +197,20 @@ def tab_survei(browser):
     browser.cookies()
     return next(p for p in reversed(browser.pages) if not p.is_closed() and p.url.startswith("https://fasih-sm.bps.go.id/app/surveys"))
 
+def gangguan(page):
+    bot = page.get_by_text(PESAN_BOT).and_(page.locator(':not(#se2026_nested [data-nested-view="true"], #se2026_nested [data-nested-view="true"] *, [id^="nama_usaha_edit#"], [id^="nama_usaha_edit#"] *)'))
+    akses = page.get_by_text("Gagal Mendapatkan Akses Approve/Reject/Edit Assignment", exact=True)
+    return bot.or_(akses).or_(page.get_by_role("button", name="Refresh Page", exact=True)).filter(visible=True).first
+
 def pasang_refresh(page):
-    refresh = page.get_by_role("button", name="Refresh Page", exact=True)
-    bot = page.get_by_text(PESAN_BOT).filter(visible=True).first
-    akses = page.get_by_text("Gagal Mendapatkan Akses Approve/Reject/Edit Assignment", exact=True).filter(visible=True).first
+    pesan = gangguan(page)
     def ulang():
         print("  [PULIH] BOT/akses gagal/Refresh Page; menutup halaman untuk restart browser.", flush=True)
         if len(page.context.pages) == 1:
             page.context.new_page()
         page.close()
-    for pesan in (bot, akses, refresh):
-        page.remove_locator_handler(pesan)
-        page.add_locator_handler(pesan, ulang, times=1, no_wait_after=True)
+    page.remove_locator_handler(pesan)
+    page.add_locator_handler(pesan, ulang, times=1, no_wait_after=True)
 
 def jeda(cfg, sisa):
     sisa -= 1
@@ -315,6 +325,7 @@ def jalankan(pemulihan=False):
             assignment = page
             result, note = "ERROR", ""
             ulang = konfirmasi = False
+            kirim_ulang = "Kirim belum selesai; pemeriksaan otomatis" in str(row.get("catatan") or "")
             tahap = "Membuka assignment detail"
             print("  " + tahap, flush=True)
             try:
@@ -338,74 +349,90 @@ def jalankan(pemulihan=False):
                 revoke, edit = page.locator(SELECTORS["revoke"]), page.locator(SELECTORS["edit"])
                 expect(revoke.or_(edit).first).to_be_visible(timeout=TIMEOUT)
                 changed = revoke.is_visible()
-                if changed:
-                    tahap = "Revoke dan konfirmasi"
-                    revoke.click()
-                    page.locator(SELECTORS["konfirmasi_revoke"]).click()
-                tahap = "Membuka Edit"
-                print("  " + tahap, flush=True)
-                edit.click(no_wait_after=True)
-                expect(edit).to_be_hidden(timeout=TIMEOUT)
-                tahap = "Membuka BLOK II"
-                page.locator(SELECTORS["blok_ii"]).click()
-                tahap = "BLOK II: membuka usaha " + row["target_usaha"]
-                print("  " + tahap, flush=True)
-                buka_usaha(page, row["target_usaha"])
-                dokumen = page.evaluate("performance.timeOrigin")
-                for column, label in FIELDS.items():
-                    if values[column] is None:
-                        continue
-                    tahap = "Mencari/mengisi " + label
+                if changed and kirim_ulang:
+                    tahap = "Memeriksa hasil Kirim sebelumnya"
                     print("  " + tahap, flush=True)
-                    field = inputan(page, label)
-                    # ponytail: nama usaha menandai form siap; tunggu indikator selesai bila form kelak dirender bertahap.
-                    assert field.count() == 1, "Input tidak terlihat/unik setelah nama usaha muncul: " + label
-                    berbeda = not field.input_value().strip() or angka(field.input_value()) != values[column]
-                    if berbeda:
-                        field.fill(format(values[column], "f"))
-                        field.press("Tab")
-                        changed = True
-                    assert angka(field.input_value()) == values[column], "Nilai web tidak sesuai Excel"
-                    if berbeda and (row.get("remarks") or "").strip():
-                        tahap = "Menyimpan remarks pada " + label
-                        print("  " + tahap, flush=True)
-                        isi_remarks(page, field, row["remarks"])
-                tahap = "CATATAN: memeriksa switch anomali"
-                print("  " + tahap, flush=True)
-                page.locator(SELECTORS["catatan"]).click()
-                switch = page.locator(SELECTORS["switch"])
-                expect(switch).to_have_count(1, timeout=TIMEOUT)
-                if switch.get_attribute("aria-checked") == "false":
-                    page.locator(SELECTORS["kontrol_switch"]).click()
-                    changed = True
-                expect(switch).to_have_attribute("aria-checked", "true", timeout=TIMEOUT)
-                assert page.evaluate("performance.timeOrigin") == dokumen, "Halaman dimuat ulang saat mengedit; periksa ulang perubahan sebelum retry"
-                if changed:
-                    tahap = "Kirim: membuka dan membaca validasi"
-                    print("  " + tahap, flush=True)
-                    page.get_by_role("button", name="Kirim", exact=True).click()
-                    detail = pesan_galat(page)
-                    if detail:
-                        cell = sheet.cell(number, keterangan, detail)
-                        cell.data_type = "s"
-                        note = "Galat validasi Kirim: " + detail
-                    else:
-                        assert page.evaluate("performance.timeOrigin") == dokumen, "Halaman dimuat ulang saat validasi; periksa ulang perubahan sebelum retry"
-                        tahap = "Kirim: menunggu konfirmasi"
-                        page.locator(SELECTORS["modal"]).get_by_role("button", name="Kirim", exact=True).click()
-                        tunggu_kirim(page, page.get_by_text("Konfirmasi Kirim", exact=True))
-                        assert page.evaluate("performance.timeOrigin") == dokumen, "Halaman dimuat ulang sebelum konfirmasi; hasil kirim perlu diperiksa sebelum retry"
-                        tahap = "Konfirmasi Kirim; hasil kirim belum dipastikan"
-                        print("  " + tahap, flush=True)
-                        konfirmasi = True
-                        page.get_by_role("button", name="Konfirmasi", exact=True).click()
-                        tunggu_kirim(page, page.get_by_text("Assignment Berhasil DisubmitPerubahan Anda berhasil disimpan.", exact=True))
-                        assert page.evaluate("performance.timeOrigin") == dokumen, "Halaman dimuat ulang saat konfirmasi; hasil kirim perlu diperiksa sebelum retry"
+                    page.locator(SELECTORS["blok_ii"]).click()
+                    buka_usaha(page, row["target_usaha"])
+                    sesuai = True
+                    for column, label in FIELDS.items():
+                        if values[column] is not None:
+                            field = inputan(page, label)
+                            assert field.count() == 1, "Input tidak terlihat/unik setelah nama usaha muncul: " + label
+                            sesuai = sesuai and angka(field.input_value()) == values[column]
+                    page.locator(SELECTORS["catatan"]).click()
+                    if sesuai and page.locator(SELECTORS["switch"]).get_attribute("aria-checked") == "true":
                         result = "SUCCESS"
-                        tahap = "Kirim berhasil; menutup konfirmasi sukses"
-                        page.get_by_role("button", name="Tetap di Halaman", exact=True).click()
-                else:
-                    result = "NO_CHANGE"
+                        note = "Kirim sebelumnya terverifikasi: assignment sudah disubmit dan nilai sesuai Excel."
+                if result != "SUCCESS":
+                    if changed:
+                        tahap = "Revoke dan konfirmasi"
+                        revoke.click()
+                        page.locator(SELECTORS["konfirmasi_revoke"]).click()
+                    tahap = "Membuka Edit"
+                    print("  " + tahap, flush=True)
+                    edit.click(no_wait_after=True)
+                    expect(edit).to_be_hidden(timeout=TIMEOUT)
+                    tahap = "Membuka BLOK II"
+                    page.locator(SELECTORS["blok_ii"]).click()
+                    tahap = "BLOK II: membuka usaha " + row["target_usaha"]
+                    print("  " + tahap, flush=True)
+                    buka_usaha(page, row["target_usaha"])
+                    dokumen = page.evaluate("performance.timeOrigin")
+                    for column, label in FIELDS.items():
+                        if values[column] is None:
+                            continue
+                        tahap = "Mencari/mengisi " + label
+                        print("  " + tahap, flush=True)
+                        field = inputan(page, label)
+                        # ponytail: nama usaha menandai form siap; tunggu indikator selesai bila form kelak dirender bertahap.
+                        assert field.count() == 1, "Input tidak terlihat/unik setelah nama usaha muncul: " + label
+                        berbeda = not field.input_value().strip() or angka(field.input_value()) != values[column]
+                        if berbeda:
+                            field.fill(format(values[column], "f"))
+                            field.press("Tab")
+                            changed = True
+                        assert angka(field.input_value()) == values[column], "Nilai web tidak sesuai Excel"
+                        if berbeda and (row.get("remarks") or "").strip():
+                            tahap = "Menyimpan remarks pada " + label
+                            print("  " + tahap, flush=True)
+                            isi_remarks(page, field, row["remarks"])
+                    tahap = "CATATAN: memeriksa switch anomali"
+                    print("  " + tahap, flush=True)
+                    page.locator(SELECTORS["catatan"]).click()
+                    switch = page.locator(SELECTORS["switch"])
+                    expect(switch).to_have_count(1, timeout=TIMEOUT)
+                    if switch.get_attribute("aria-checked") == "false":
+                        page.locator(SELECTORS["kontrol_switch"]).click()
+                        changed = True
+                    expect(switch).to_have_attribute("aria-checked", "true", timeout=TIMEOUT)
+                    assert page.evaluate("performance.timeOrigin") == dokumen, "Halaman dimuat ulang saat mengedit; periksa ulang perubahan sebelum retry"
+                    if changed or kirim_ulang:
+                        tahap = "Kirim: membuka dan membaca validasi"
+                        print("  " + tahap, flush=True)
+                        page.get_by_role("button", name="Kirim", exact=True).click()
+                        detail = pesan_galat(page)
+                        if detail:
+                            cell = sheet.cell(number, keterangan, detail)
+                            cell.data_type = "s"
+                            note = "Galat validasi Kirim: " + detail
+                        else:
+                            assert page.evaluate("performance.timeOrigin") == dokumen, "Halaman dimuat ulang saat validasi; periksa ulang perubahan sebelum retry"
+                            tahap = "Kirim: menunggu konfirmasi"
+                            page.locator(SELECTORS["modal"]).get_by_role("button", name="Kirim", exact=True).click()
+                            tunggu_kirim(page, page.get_by_text("Konfirmasi Kirim", exact=True))
+                            assert page.evaluate("performance.timeOrigin") == dokumen, "Halaman dimuat ulang sebelum konfirmasi; hasil kirim perlu diperiksa sebelum retry"
+                            tahap = "Konfirmasi Kirim; hasil kirim belum dipastikan"
+                            print("  " + tahap, flush=True)
+                            konfirmasi = True
+                            page.get_by_role("button", name="Konfirmasi", exact=True).click()
+                            tunggu_kirim(page, page.get_by_text("Assignment Berhasil DisubmitPerubahan Anda berhasil disimpan.", exact=True))
+                            assert page.evaluate("performance.timeOrigin") == dokumen, "Halaman dimuat ulang saat konfirmasi; hasil kirim perlu diperiksa sebelum retry"
+                            result = "SUCCESS"
+                            tahap = "Kirim berhasil; menutup konfirmasi sukses"
+                            page.get_by_role("button", name="Tetap di Halaman", exact=True).click()
+                    else:
+                        result = "NO_CHANGE"
                 tahap = "Menyimpan sesi setelah " + result
                 sesi(browser, page, root / ".fasih-profile" / "sesi.json", simpan=True)
             except (Error, AssertionError, ValueError, InvalidOperation) as error:
@@ -413,11 +440,11 @@ def jalankan(pemulihan=False):
                 note = f"{tahap} | {type(error).__name__}: {error_text}"
                 ulang = result == "ERROR" and (page.is_closed() or assignment.is_closed() or isinstance(error, Error) or "timeout" in error_text.lower() or "Halaman dimuat ulang" in error_text or "presigned URL" in error_text or bool(PESAN_BOT.search(error_text)))
                 with suppress(Error):
-                    ulang = ulang or any(not tab.is_closed() and tab.get_by_text(PESAN_BOT).or_(tab.get_by_role("button", name="Refresh Page", exact=True)).or_(tab.get_by_text("Gagal Mendapatkan Akses Approve/Reject/Edit Assignment", exact=True)).filter(visible=True).first.is_visible() for tab in (page, assignment))
+                    ulang = ulang or any(not tab.is_closed() and gangguan(tab).is_visible() for tab in (page, assignment))
                 ulang = ulang and not isinstance(error, (ValueError, InvalidOperation))
-                if konfirmasi and result == "ERROR":
+                if result == "ERROR" and (konfirmasi or (ulang and tahap.startswith("Kirim:"))):
                     ulang = True
-                    note = tahap + " | Hasil Kirim belum pasti; periksa manual sebelum RETRY."
+                    note = tahap + " | Kirim belum selesai; pemeriksaan otomatis setelah restart sebelum mengirim ulang."
                 elif ulang:
                     note = tahap + " | Akses/server belum siap; restart otomatis dan ulang baris ini."
             finally:
@@ -425,7 +452,7 @@ def jalankan(pemulihan=False):
                     if tab != assignment and not tab.is_closed() and len(browser.pages) > 1:
                         with suppress(Error):
                             tab.close()
-            sheet.cell(number, status, "RETRY" if ulang and not konfirmasi else result)
+            sheet.cell(number, status, "RETRY" if ulang and result == "ERROR" else result)
             if note:
                 cell = sheet.cell(number, catatan)
                 text = str(cell.value or "")
