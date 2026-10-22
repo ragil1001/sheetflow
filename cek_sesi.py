@@ -18,6 +18,7 @@ for sequence in ([None], [True, True, True, None], [Error("Server down"), True, 
         main()
         assert run.call_count == len(sequence), "Pemulihan berhenti sebelum server pulih"
         assert delay.call_count == len(sequence) - 1
+        assert all(1000 <= c.args[1] <= 5000 for c in delay.call_args_list)
         assert run.call_args_list == [call(pemulihan=False)] + [call(pemulihan=True)] * (len(sequence) - 1)
 
 def nama_form(target):
@@ -98,17 +99,22 @@ with TemporaryDirectory() as temp, patch("fasih.hitung_mundur", side_effect=lamb
                 assert page.locator('[data-clicked="true"]').count() == 0
                 page.set_content('<div id="se2026_nested">' + kartu_usaha + '</div><section id="nama" hidden>'
                                  '<div id="nama_usaha_edit#1002">' + wadah_nama + '<input value="USAHA CONTOH (PEMILIK B)"></div></div></section>')
-                with TestCase().assertRaisesRegex(AssertionError, "tidak sesuai"):
+                with TestCase().assertRaisesRegex(ValueError, "tidak sesuai"):
                     buka_usaha(page, "USAHA CONTOH <PEMILIK A>")
                 page.set_content('<div id="se2026_nested">' + kartu_usaha + '</div><section id="nama" hidden>'
                                  '<div id="nama_usaha_edit#1002">' + wadah_nama + '<div>USAHA CONTOH (PEMILIK B)</div></div></div></section>'
                                  '<div>USAHA CONTOH &lt;PEMILIK A&gt;</div>')
-                with TestCase().assertRaisesRegex(AssertionError, "tidak sesuai"):
+                with TestCase().assertRaisesRegex(ValueError, "tidak sesuai"):
                     buka_usaha(page, "USAHA CONTOH <PEMILIK A>")
                 page.set_content('<div id="se2026_nested">' + kartu_usaha
                                  + '<div data-nested-view="true" onclick="this.dataset.clicked=\'true\'"><span>USAHA CONTOH &lt;PEMILIK A&gt;</span></div></div>' + nama_form("USAHA CONTOH (PEMILIK A)"))
                 buka_usaha(page, "USAHA CONTOH <PEMILIK A>")
                 assert page.locator('[data-clicked="true"]').inner_text() == "USAHA CONTOH <PEMILIK A>"
+                page.set_content('<div id="se2026_nested"><div data-nested-view="true" onclick="document.getElementById(\'nama_usaha_edit#1002\').hidden=false">USAHA SIAP</div></div>'
+                                 '<div id="nama_usaha_edit#1002" hidden><label>Nama usaha/perusahaan<input value="USAHA SIAP"></label></div>')
+                buka_usaha(page, "USAHA SIAP")
+                page.set_content('<div id="se2026_nested"><div data-nested-view="true">USAHA SIAP</div></div><input id="nama_usaha_edit#1002" value="USAHA SIAP">')
+                buka_usaha(page, "USAHA SIAP")
                 page.set_content('<div id="se2026_nested"><div data-nested-view="true"><div data-nested-view="true" '
                                  'onclick="this.dataset.clicked=\'true\'"><span>USAHA&nbsp;CONTOH  TIGA</span></div></div></div>' + nama_form("USAHA CONTOH TIGA"))
                 buka_usaha(page, "USAHA CONTOH TIGA")
@@ -120,9 +126,8 @@ with TemporaryDirectory() as temp, patch("fasih.hitung_mundur", side_effect=lamb
                 assert page.locator('[data-clicked="true"]').count() == 0
                 page.set_content('<div id="se2026_nested"><div data-nested-view="true" onclick="this.dataset.clicked=\'true\'">USAHA LAIN</div></div>')
                 with patch("fasih.TIMEOUT", 2000), patch("fasih.TIMEOUT_CARI_USAHA", 100):
-                    with TestCase().assertRaisesRegex(AssertionError, "Kartu usaha tidak ditemukan: USAHA TARGET") as gagal:
+                    with TestCase().assertRaisesRegex(ValueError, "Kartu usaha tidak ditemukan: USAHA TARGET") as gagal:
                         buka_usaha(page, "USAHA TARGET")
-                    assert "timeout 100ms" in str(gagal.exception)
                     assert "Kartu terlihat: USAHA LAIN" in str(gagal.exception)
                 assert page.locator('[data-clicked="true"]').count() == 0
                 page.set_content('<div id="se2026_nested"></div>' + nama_form("USAHA LAMBAT"))
@@ -212,6 +217,7 @@ with TemporaryDirectory() as temp, patch("fasih.hitung_mundur", side_effect=lamb
                 sheet.append(["ubah", "USAHA BERIKUTNYA", *[0 if k in ("tk_laki_laki", "upah_gaji") else None for k in FIELDS], "Hasil konfirmasi", "TODO"])
                 sheet.append(["tetap", "USAHA BERIKUTNYA", *[0 if k in ("tk_laki_laki", "upah_gaji") else None for k in FIELDS], "Tidak disalin", "TODO"])
                 sheet.append(["input-hilang", "USAHA BERIKUTNYA", *[1 if k == "perbaikan_produksi" else None for k in FIELDS], None, "TODO"])
+                sheet.append(["nama-berbeda", "USAHA timeout (PEMILIK A)", *([None] * len(FIELDS)), None, "TODO"])
                 sheet.append(["sesudah-error", "USAHA BERIKUTNYA", *([None] * len(FIELDS)), None, "TODO"])
                 book.save(root / "uji.xlsx")
                 book.close()
@@ -230,6 +236,10 @@ with TemporaryDirectory() as temp, patch("fasih.hitung_mundur", side_effect=lamb
                     + '<section id="editor" hidden><textarea placeholder="Tambah catatan di sini..."></textarea>'
                     '<button onclick="localStorage.setItem(\'remarks_\'+document.body.dataset.field,document.querySelector(\'textarea\').value)">Simpan</button>'
                     '<button onclick="this.parentElement.hidden=true">Dismiss</button></section><button>Kirim</button>')))
+                context.route("**/uji-form/nama-berbeda", lambda r: r.fulfill(content_type="text/html", body=(
+                    '<button>Ringkasan</button><button onclick="this.hidden=true"><svg class="tabler-icon-edit" width="24" height="24"></svg></button>'
+                    '<div class="fasih-form-sidebar"><div title="SE2026 - L BLOK II">BLOK II</div></div>'
+                    '<div id="se2026_nested"><div data-nested-view="true">USAHA timeout</div></div>' + nama_form("USAHA timeout (PEMILIK B)"))))
                 with patch("fasih.__file__", str(root / "fasih.py")), patch("fasih.TIMEOUT", 5000), patch("fasih.TIMEOUT_CARI_USAHA", 100), \
                      patch("fasih.Camoufox", return_value=nullcontext(context)) as launch, patch("builtins.input", return_value=""), \
                      patch("fasih.isi_remarks", wraps=isi_remarks) as remarks, patch("fasih.pesan_galat", return_value="Validasi uji") as validasi, \
@@ -240,19 +250,20 @@ with TemporaryDirectory() as temp, patch("fasih.hitung_mundur", side_effect=lamb
                     assert all(c.args[2] == "Hasil konfirmasi" for c in remarks.call_args_list)
                     assert validasi.call_count == 1, "Input hilang diteruskan ke Kirim"
                     pesan_terminal = [c.args[0] for c in output.call_args_list]
-                    assert any("[MULAI] 6 baris; headless=" in text for text in pesan_terminal)
+                    assert any("[MULAI] 7 baris; headless=" in text for text in pesan_terminal)
                     assert "[SESI] Halaman Survei terbuka. Mulai memeriksa assignment." in pesan_terminal
-                    assert "[1/6] Baris Excel 2: USAHA CONTOH TIGA" in pesan_terminal
+                    assert "[1/7] Baris Excel 2: USAHA CONTOH TIGA" in pesan_terminal
                     assert pesan_terminal.count("  [HASIL] NO_CHANGE; progres disimpan.") == 3
-                    assert pesan_terminal.count("  [HASIL] ERROR; progres disimpan.") == 3
+                    assert pesan_terminal.count("  [HASIL] ERROR; progres disimpan.") == 4
                     assert "  [CATATAN] Galat validasi Kirim: Validasi uji" in pesan_terminal
-                    assert pesan_terminal[-1] == "[SELESAI] SUCCESS=0, NO_CHANGE=3, ERROR=3."
+                    assert pesan_terminal[-1] == "[SELESAI] SUCCESS=0, NO_CHANGE=3, ERROR=4."
+                    launch.assert_called_once()
                 book = load_workbook(root / "uji.xlsx")
                 data = list(book["Sheet1"].values)
                 headers = list(data[0])
                 assert data[1][headers.index("status")] == "ERROR"
                 note = data[1][headers.index("catatan")]
-                assert note.startswith("Catatan operator\nBLOK II: membuka usaha USAHA CONTOH TIGA | AssertionError:")
+                assert note.startswith("Catatan operator\nBLOK II: membuka usaha USAHA CONTOH TIGA | ValueError:")
                 assert "Kartu usaha tidak ditemukan" in note
                 assert "Kartu terlihat: USAHA BERIKUTNYA" in note
                 assert data[2][headers.index("status")] == "NO_CHANGE"
@@ -262,12 +273,13 @@ with TemporaryDirectory() as temp, patch("fasih.hitung_mundur", side_effect=lamb
                 assert data[5][headers.index("status")] == "ERROR"
                 assert "Input tidak terlihat/unik setelah nama usaha muncul" in data[5][headers.index("catatan")]
                 assert "timeout" not in data[5][headers.index("catatan")].lower(), "Input hilang masih ditunggu"
-                assert data[6][headers.index("status")] == "NO_CHANGE", "Error input menghentikan baris selanjutnya"
+                assert data[6][headers.index("status")] == "ERROR" and "Nama usaha dalam form tidak sesuai" in data[6][headers.index("catatan")]
+                assert data[7][headers.index("status")] == "NO_CHANGE", "Error input/nama menghentikan baris selanjutnya"
                 assignment.wait_for_function("() => ['gaji','pekerja'].every(k => localStorage.getItem('remarks_'+k+'#2099') === 'Hasil konfirmasi')", timeout=5000)
                 context.cookies()
                 assert context.pages == [assignment], [tab.url for tab in context.pages]
                 book.close()
-                for panne in ("bot", "down", "popup-bot", "popup-down", "refresh", "popup-refresh"):
+                for panne in ("bot", "down", "popup-bot", "popup-down", "refresh", "popup-refresh", "blok-bot", "nama-bot"):
                     book = Workbook()
                     sheet = book.active
                     sheet.title = "Sheet1"
@@ -276,11 +288,19 @@ with TemporaryDirectory() as temp, patch("fasih.hitung_mundur", side_effect=lamb
                     sheet.append(["suivant", "USAHA BERIKUTNYA", *([None] * len(FIELDS)), "TODO"])
                     book.save(root / "uji.xlsx")
                     book.close()
-                    if panne.startswith("popup-"):
+                    if panne.startswith(("popup-", "blok-", "nama-")):
                         route = "**/uji-form/" + panne
                     else:
                         route = "**/app/assignment-detail/" + panne
-                    context.route(route, lambda r: r.fulfill(content_type="text/html", body="<p>Bot Detected</p>" if panne.endswith("bot") else "<button>Refresh Page</button>" if panne.endswith("refresh") else "<p>Service unavailable</p>"))
+                    def gangguan(route):
+                        html = "<p>Bot Detected</p>" if panne.endswith("bot") else "<button>Refresh Page</button>" if panne.endswith("refresh") else "<p>Service unavailable</p>"
+                        if panne.startswith(("blok-", "nama-")):
+                            html = ('<button>Ringkasan</button><button onclick="this.hidden=true"><svg class="tabler-icon-edit" width="24" height="24"></svg></button>'
+                                    '<div class="fasih-form-sidebar"><div title="SE2026 - L BLOK II" onclick="document.body.innerHTML=\'<p>Bot Detected</p>\'">BLOK II</div></div>')
+                            if panne == "nama-bot":
+                                html = html.replace(' onclick="document.body.innerHTML=\'<p>Bot Detected</p>\'"', '') + '<div id="se2026_nested"><div data-nested-view="true" onclick="document.body.innerHTML=\'<p>Bot Detected</p>\'">USAHA BERIKUTNYA</div></div>'
+                        route.fulfill(content_type="text/html", body=html)
+                    context.route(route, gangguan)
                     for attempt in range(3):
                         with patch("fasih.__file__", str(root / "fasih.py")), patch("fasih.TIMEOUT", 500), \
                              patch("fasih.Camoufox", return_value=nullcontext(context)), patch("builtins.input", return_value=""), patch("builtins.print") as output:
@@ -445,16 +465,16 @@ with TemporaryDirectory() as temp, patch("fasih.hitung_mundur", side_effect=lamb
     @contextmanager
     def buka_ulang(**options):
         assert len(launches) == len(closed), "Browser lama masih terbuka saat restart"
-        assert len(launches) < 3, "Pemulihan tidak selesai setelah server normal"
+        assert len(launches) < 4, "Pemulihan tidak selesai setelah server normal"
         with Camoufox(**{**options, "headless": True, "timeout": 90000}) as profile:
             launches.append(options["user_data_dir"])
             if len(launches) == 1:
                 profile.add_cookies([{"name": "restart", "value": "lokal", "url": "https://fasih-sm.bps.go.id"}])
             profile.route("**/*", lambda r: r.fulfill(content_type="text/html", body="Survei"))
             profile.route("**/app/assignment-detail/*", lambda r: r.fulfill(content_type="text/html", body=(
-                "<p>Bot Detected</p>" if len(launches) == 1 else '<button onclick="window.open(\'/form\')">Review</button>')))
+                "<p>Bot Detected</p>" if len(launches) == 2 else '<button onclick="window.open(\'/form\')">Review</button>')))
             def survei(route):
-                route.fulfill(content_type="text/html", status=503 if len(launches) == 2 else 200, body="Survei")
+                route.fulfill(content_type="text/html", status=503 if len(launches) == 3 else 200, body="<p>Bot Detected</p>" if len(launches) == 1 else "Survei")
             profile.route("**/app/surveys?*", survei)
             profile.route("**/form", lambda r: r.fulfill(content_type="text/html", body=(
                 '<button>Ringkasan</button><button onclick="this.hidden=true"><svg class="tabler-icon-edit" width="24" height="24"></svg></button>'
@@ -472,8 +492,8 @@ with TemporaryDirectory() as temp, patch("fasih.hitung_mundur", side_effect=lamb
          patch("fasih.Camoufox", side_effect=buka_ulang), patch("fasih.sesi", side_effect=cek_restore), patch("fasih.hitung_mundur"), \
          patch("builtins.input", return_value="") as prompt, patch("builtins.print"):
         main()
-        assert len(launches) == len(closed) == 3 and len(set(launches)) == 1
-        prompt.assert_called_once()
+        assert len(launches) == len(closed) == 4 and len(set(launches)) == 1
+        prompt.assert_not_called()
     book = load_workbook(root / "uji.xlsx")
     assert book["Sheet1"].cell(2, len(FIELDS) + 3).value == "NO_CHANGE"
     book.close()

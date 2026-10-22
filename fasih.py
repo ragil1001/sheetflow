@@ -36,7 +36,7 @@ SELECTORS = {
     "edit": 'button:visible:has(svg.tabler-icon-edit)',
     "blok_ii": '.fasih-form-sidebar:visible > div[title="SE2026 - L BLOK II"]:visible',
     "kartu_usaha": '#se2026_nested [data-nested-view="true"]:visible',
-    "nama_usaha": r'[id^="nama_usaha_edit#"]:visible div.tw\:flex.tw\:gap-2.tw\:rounded-lg.tw\:py-2.tw\:\@lg\/form\:flex-row.tw\:flex-col:visible',
+    "nama_usaha": '[id^="nama_usaha_edit#"]:visible',
     "catatan": '.fasih-form-sidebar:visible > div[title="CATATAN"]:visible',
     "switch": '#cek_anomali_button input[role="switch"]',
     "kontrol_switch": '#cek_anomali_button div[id$="-control"]',
@@ -74,7 +74,12 @@ def buka_usaha(page, target):
     kandidat = daftar.get_by_text(pola_usaha(target)).or_(daftar.get_by_text(pola_ringkas)).filter(visible=True)
     # ponytail: kartu muncul menandai daftar siap; gunakan indikator selesai jika tersedia.
     terlihat = " | ".join(" ".join(text.split()) for text in cards.all_inner_texts())[:1500]
-    expect(kandidat.first, "Kartu usaha tidak ditemukan: " + target + " | Kartu terlihat: " + terlihat).to_be_visible(timeout=TIMEOUT_CARI_USAHA)
+    try:
+        expect(kandidat.first, "Kartu usaha tidak ditemukan: " + target + " | Kartu terlihat: " + terlihat).to_be_visible(timeout=TIMEOUT_CARI_USAHA)
+    except AssertionError as error:
+        if page.is_closed():
+            raise
+        raise ValueError("Kartu usaha tidak ditemukan: " + target + " | Kartu terlihat: " + terlihat) from error
     pattern = re.compile(r"^\s*" + re.escape(target).replace(r"\ ", r"\s+") + r"\s*$", re.I)
     name = daftar.get_by_text(pattern).filter(visible=True)
     if not name.count():
@@ -89,13 +94,14 @@ def buka_usaha(page, target):
     name.first.click()
     nama = page.locator(SELECTORS["nama_usaha"])
     expect(nama, "Wadah nama usaha setelah kartu dibuka tidak ditemukan").to_have_count(1, timeout=TIMEOUT)
-    field = nama.locator("input:visible")
+    field = nama.locator("input:visible").or_(nama.and_(page.locator("input:visible")))
     if field.count():
         expect(field).not_to_have_value(re.compile(r"^\s*$"), timeout=TIMEOUT)
         cocok = pola_usaha(target).fullmatch(" ".join(field.input_value().split()))
     else:
         cocok = nama.get_by_text(pola_usaha(target)).count() == 1
-    assert cocok, "Nama usaha dalam form tidak sesuai target Excel"
+    if not cocok:
+        raise ValueError("Nama usaha dalam form tidak sesuai target Excel: " + target)
 
 def isi_remarks(page, field, text):
     wadah = field.locator('xpath=ancestor::*[contains(@id, "#")][1]')
@@ -189,6 +195,8 @@ def pasang_refresh(page):
     akses = page.get_by_text("Gagal Mendapatkan Akses Approve/Reject/Edit Assignment", exact=True).filter(visible=True).first
     def ulang():
         print("  [PULIH] BOT/akses gagal/Refresh Page; menutup halaman untuk restart browser.", flush=True)
+        if len(page.context.pages) == 1:
+            page.context.new_page()
         page.close()
     for pesan in (bot, akses, refresh):
         page.remove_locator_handler(pesan)
@@ -403,9 +411,10 @@ def jalankan(pemulihan=False):
             except (Error, AssertionError, ValueError, InvalidOperation) as error:
                 error_text = str(error).strip()
                 note = f"{tahap} | {type(error).__name__}: {error_text}"
-                ulang = result == "ERROR" and "Kartu usaha tidak ditemukan:" not in error_text and (isinstance(error, Error) or "timeout" in error_text.lower() or "Halaman dimuat ulang" in error_text or "presigned URL" in error_text or bool(PESAN_BOT.search(error_text)))
+                ulang = result == "ERROR" and (page.is_closed() or assignment.is_closed() or isinstance(error, Error) or "timeout" in error_text.lower() or "Halaman dimuat ulang" in error_text or "presigned URL" in error_text or bool(PESAN_BOT.search(error_text)))
                 with suppress(Error):
                     ulang = ulang or any(not tab.is_closed() and tab.get_by_text(PESAN_BOT).or_(tab.get_by_role("button", name="Refresh Page", exact=True)).or_(tab.get_by_text("Gagal Mendapatkan Akses Approve/Reject/Edit Assignment", exact=True)).filter(visible=True).first.is_visible() for tab in (page, assignment))
+                ulang = ulang and not isinstance(error, (ValueError, InvalidOperation))
                 if konfirmasi and result == "ERROR":
                     ulang = True
                     note = tahap + " | Hasil Kirim belum pasti; periksa manual sebelum RETRY."
@@ -413,7 +422,7 @@ def jalankan(pemulihan=False):
                     note = tahap + " | Akses/server belum siap; restart otomatis dan ulang baris ini."
             finally:
                 for tab in browser.pages:
-                    if tab != assignment and not tab.is_closed():
+                    if tab != assignment and not tab.is_closed() and len(browser.pages) > 1:
                         with suppress(Error):
                             tab.close()
             sheet.cell(number, status, "RETRY" if ulang and not konfirmasi else result)
@@ -458,8 +467,8 @@ def main():
         except Error as error:
             print("[PULIH] Browser/koneksi gagal: " + str(error).splitlines()[0], flush=True)
         pemulihan = True
-        print("[PULIH] Browser ditutup. Membuka ulang dengan profil/cookie sama setelah jeda 30 detik; Ctrl+C untuk berhenti.", flush=True)
-        hitung_mundur(None, 30000, "Menunggu restart")
+        print("[PULIH] Browser ditutup. Membuka ulang dengan profil/cookie sama setelah jeda 1–5 detik; Ctrl+C untuk berhenti.", flush=True)
+        hitung_mundur(None, random.uniform(1000, 5000), "Menunggu restart")
 
 if __name__ == "__main__":
     main()
