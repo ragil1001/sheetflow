@@ -17,14 +17,14 @@ assert sisa == 1
 assert jeda({**cfg, "batch_min": 1, "batch_max": 1}, 1) == (120000, 1)
 
 page = Mock()
-with patch("fasih.monotonic", side_effect=[10, 10, 11, 12, 12.5]), patch("builtins.print") as output:
+with patch("fasih.monotonic", side_effect=[10, 10, 11, 12, 12.5]), patch("fasih.expect"), patch("builtins.print") as output:
     hitung_mundur(page, 2500)
     assert page.wait_for_timeout.call_args_list == [call(1000), call(1000), call(500)]
     assert output.call_args_list == [
         call(f"\rIstirahat batch: 00:{s:02d}", end="", flush=True) for s in (3, 2, 1, 0)
     ] + [call(" - lanjut.")]
 page.reset_mock()
-with patch("fasih.monotonic", side_effect=[10, 10, 11]), patch("builtins.print") as output:
+with patch("fasih.monotonic", side_effect=[10, 10, 11]), patch("fasih.expect"), patch("builtins.print") as output:
     hitung_mundur(page, 1000, "Menunggu hard refresh")
     assert output.call_args_list == [call("\rMenunggu hard refresh: 00:01", end="", flush=True),
                                      call("\rMenunggu hard refresh: 00:00", end="", flush=True), call(" - lanjut.")]
