@@ -9,10 +9,10 @@ from camoufox.sync_api import Camoufox
 from openpyxl import Workbook, load_workbook
 from playwright.sync_api import Error, expect
 
-from fasih import FIELDS, PESAN_BOT, buka_usaha, identitas, jalankan, kirim, main, pasang_refresh, sesi
+from fasih import FIELDS, PESAN_BOT, buka_usaha, identitas, jalankan, kirim, main, pasang_refresh, pesan_galat, sesi
 
 
-for sequence in ([False], [True, True, True, False], [Error("Server down"), True, False]):
+for sequence in ([False], [True, True, True, False]):
     with patch("fasih.jalankan", side_effect=sequence) as run, patch("fasih.sleep") as pause:
         main()
         assert run.call_args_list == [call(pemulihan=False)] + [call(pemulihan=True)] * (len(sequence) - 1)
@@ -83,19 +83,40 @@ with TemporaryDirectory() as temp, patch("builtins.print") as output:
         with patch.object(page, "wait_for_timeout", side_effect=AssertionError("Sukses masih ditunggu")):
             assert kirim(page) == ""
         assert page.locator("body").get_attribute("data-kirim") is None, "Sudah sukses tetapi Kirim diklik lagi"
+        page.set_content('<h2>Assignment Berhasil Disubmit</h2><button>Tetap di Halaman</button>')
+        with patch("fasih.TIMEOUT", 50):
+            assert pesan_galat(page) == "", "Modal sukses masih menunggu modal validasi"
+        page.set_content('<button onclick="this.disabled=true;setTimeout(()=>{document.body.innerHTML=\'<h2>Assignment Berhasil Disubmit</h2><button>Tetap di Halaman</button>\'},100)">Kirim</button>')
+        with patch("fasih.TIMEOUT", 50), patch.object(page, "wait_for_timeout", wraps=page.wait_for_timeout) as tunggu:
+            assert kirim(page) == ""
+            assert all(c.args[0] <= 100 for c in tunggu.call_args_list), "Sukses tertunda oleh jeda tetap"
+        page.set_content(modal + '<button disabled>Kirim</button></div><script>setTimeout(()=>{document.body.innerHTML=\'<h2>Assignment Berhasil Disubmit</h2><button>Tetap di Halaman</button>\'},100)</script>')
+        with patch.object(page, "reload", side_effect=AssertionError("Loading Kirim direfresh")):
+            assert kirim(page) == "", "Kirim masih menunggu tombol pada modal lama"
         page.set_content('<button>Kirim</button>' + modal + '<button>Galat 1 Perlu diperbaiki</button></div>')
         with patch("fasih.pesan_galat", return_value="Data wajib diperbaiki"):
             assert kirim(page) == "Data wajib diperbaiki"
         page.set_content(submit.replace("function gagal(stage){", "function gagal(stage){document.querySelector('#error').hidden=false;") + '<p id="error" hidden>Failed presigned URL</p>')
         with patch("fasih.TIMEOUT", 1000):
             assert kirim(page) == "", "Pesan presigned lama menghalangi Kirim ulang"
-        for html in ("<p>Bot Detected</p>", "<p>Anda terdeteksi sebagai bot</p>", "<p>BOT-12345678</p>", "<button>Refresh Page</button>"):
-            assert PESAN_BOT.search(html) or "Refresh Page" in html
+        for html in ("<p>Bot Detected</p>", "<p>Anda terdeteksi sebagai bot</p>", "<p>BOT-12345678</p>"):
+            assert PESAN_BOT.search(html)
             tab = context.new_page()
             tab.set_content(html)
             with TestCase().assertRaises((Error, AssertionError)):
                 expect(tab.get_by_role("button", name="Ringkasan")).to_be_visible(timeout=500)
             assert tab.is_closed()
+
+        page.set_content('<p>Loading...</p>')
+        page.evaluate("setTimeout(() => document.body.innerHTML='<button>Ringkasan</button>', 300)")
+        with patch("fasih.TIMEOUT", 50), patch.object(page, "reload", side_effect=AssertionError("Loading direfresh")):
+            expect(page.get_by_role("button", name="Ringkasan")).to_be_visible(timeout=0)
+        tab = context.new_page()
+        tab.set_content('<button onclick="document.body.dataset.refresh=Number(document.body.dataset.refresh||0)+1;if(document.body.dataset.refresh===\'3\')document.body.innerHTML=\'<button>Ringkasan</button>\'">Refresh Page</button>')
+        with patch.object(tab, "reload", side_effect=AssertionError("Refresh browser dipakai")):
+            expect(tab.get_by_role("button", name="Ringkasan")).to_be_visible(timeout=2000)
+        assert not tab.is_closed() and tab.locator("body").get_attribute("data-refresh") == "3"
+        tab.close()
 
         context.route("**/app/assignment-detail/*", lambda r: r.fulfill(content_type="text/html", body='<button onclick="window.open(\'/form/' + r.request.url.rsplit('/', 1)[-1] + '\')">Review</button>'))
         def halaman(route):
@@ -104,20 +125,22 @@ with TemporaryDirectory() as temp, patch("builtins.print") as output:
             if ident == "kirim":
                 html = html.replace('<p>Assignment Berhasil DisubmitPerubahan Anda berhasil disimpan.</p>', '<h2>Assignment Berhasil Disubmit</h2><p>Perubahan Anda berhasil disimpan.</p>')
                 html = html.replace('<button>Tetap di Halaman</button>', '<button onclick="localStorage.setItem(\'sukses_ditutup\',\'1\')">Tetap di Halaman</button>')
+            elif ident == "lambat":
+                html = '<p>Loading...</p><template>' + form + '</template><script>setTimeout(()=>{document.body.innerHTML=document.querySelector("template").innerHTML},300)</script>'
             if ident == "beda":
                 html = html.replace(">USAHA CONTOH</div>", ">USAHA LAIN</div>")
             elif ident == "akses":
                 html = html.replace('<button onclick="this.hidden=true"><svg class="tabler-icon-edit" width="24" height="24"></svg></button>', "")
             route.fulfill(content_type="text/html", body=html)
         context.route("**/form/*", halaman)
-        workbook([("beda", "USAHA CONTOH", None), ("akses", "USAHA CONTOH", None), ("angka", "USAHA CONTOH", -1), ("lanjut", "USAHA CONTOH (PEMILIK A)", None), ("kirim", "USAHA CONTOH", 1)])
+        workbook([("beda", "USAHA CONTOH", None), ("akses", "USAHA CONTOH", None), ("angka", "USAHA CONTOH", -1), ("lanjut", "USAHA CONTOH (PEMILIK A)", None), ("lambat", "USAHA CONTOH", None), ("kirim", "USAHA CONTOH", 1)])
         with patch("fasih.__file__", str(root / "fasih.py")), patch("fasih.TIMEOUT", 1000), patch("fasih.TIMEOUT_CARI_USAHA", 50), \
              patch("fasih.Camoufox", side_effect=[nullcontext(context)]), patch("builtins.input", return_value=""), patch("fasih.sleep") as pause:
             main()
             pause.assert_not_called()
         book = load_workbook(root / "uji.xlsx")
         rows = list(book["Sheet1"].values)
-        assert [row[rows[0].index("status")] for row in rows[1:]] == ["ERROR", "ERROR", "ERROR", "NO_CHANGE", "SUCCESS"], rows
+        assert [row[rows[0].index("status")] for row in rows[1:]] == ["ERROR", "ERROR", "ERROR", "NO_CHANGE", "NO_CHANGE", "SUCCESS"], rows
         assert "Kartu usaha tidak cocok" in rows[1][rows[0].index("catatan")]
         assert "Akses edit tidak tersedia" in rows[2][rows[0].index("catatan")]
         assert "Angka tidak valid" in rows[3][rows[0].index("catatan")]
@@ -153,12 +176,12 @@ with TemporaryDirectory() as temp, patch("builtins.print") as output:
     launches, closed = [], []
     @contextmanager
     def buka(**options):
-        assert len(launches) == len(closed) and len(launches) < 4, output.call_args_list[-20:]
+        assert len(launches) == len(closed) and len(launches) < 3, output.call_args_list[-20:]
         with Camoufox(**{**options, "headless": True, "timeout": 90000}) as context:
             launches.append(options["user_data_dir"])
             context.route("**/*", lambda r: r.fulfill(content_type="text/html", body="Survei"))
             def survei(route):
-                route.fulfill(content_type="text/html", status=503 if len(launches) == 3 else 200, body="Bot Detected" if len(launches) < 3 else "Survei")
+                route.fulfill(content_type="text/html", body="Bot Detected" if len(launches) < 3 else "Survei")
             context.route("**/app/surveys?*", survei)
             context.route("**/app/assignment-detail/*", lambda r: r.fulfill(content_type="text/html", body='<button onclick="window.open(\'/form\')">Review</button>'))
             context.route("**/form", lambda r: r.fulfill(content_type="text/html", body=form))
@@ -168,8 +191,8 @@ with TemporaryDirectory() as temp, patch("builtins.print") as output:
     with patch("fasih.__file__", str(root / "fasih.py")), patch("fasih.TIMEOUT", 5000), patch("fasih.Camoufox", side_effect=buka), \
          patch("builtins.input", return_value=""), patch("fasih.sleep") as pause:
         main()
-        assert len(launches) == len(closed) == 4 and len(set(launches)) == 1
-        assert pause.call_args_list == [call(2)] * 3
+        assert len(launches) == len(closed) == 3 and len(set(launches)) == 1
+        assert pause.call_args_list == [call(2)] * 2
     book = load_workbook(root / "uji.xlsx")
     assert book["Sheet1"].cell(2, len(FIELDS) + 3).value == "NO_CHANGE"
     book.close()
