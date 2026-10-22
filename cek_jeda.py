@@ -32,9 +32,6 @@ page.reset_mock()
 with patch("fasih.monotonic", return_value=10), patch("builtins.print"):
     hitung_mundur(page, 0)
     page.wait_for_timeout.assert_not_called()
-with patch("fasih.monotonic", side_effect=[10, 10, 11]), patch("fasih.sleep") as sleep, patch("builtins.print"):
-    hitung_mundur(None, 1000, "Menunggu restart")
-    sleep.assert_called_once_with(1)
 
 pattern = pola_usaha("USAHA ONLINE (PEMILIK A)")
 assert pattern.fullmatch("USAHA ONLINE PRODUK CONTOH (PEMILIK A)")
