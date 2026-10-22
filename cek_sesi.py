@@ -79,6 +79,10 @@ with TemporaryDirectory() as temp, patch("builtins.print") as output:
         with patch("fasih.TIMEOUT", 1000):
             assert kirim(page) == ""
         assert page.evaluate("({...document.body.dataset})") == {"awal": "3", "modal": "2", "konfirmasi": "2"}
+        page.set_content('<button onclick="document.body.dataset.kirim=1">Kirim</button>' + modal + '<h2>Berhasil</h2><button>Tetap di Halaman</button></div>')
+        with patch.object(page, "wait_for_timeout", side_effect=AssertionError("Sukses masih ditunggu")):
+            assert kirim(page) == ""
+        assert page.locator("body").get_attribute("data-kirim") is None, "Sudah sukses tetapi Kirim diklik lagi"
         page.set_content('<button>Kirim</button>' + modal + '<button>Galat 1 Perlu diperbaiki</button></div>')
         with patch("fasih.pesan_galat", return_value="Data wajib diperbaiki"):
             assert kirim(page) == "Data wajib diperbaiki"
@@ -97,6 +101,9 @@ with TemporaryDirectory() as temp, patch("builtins.print") as output:
         def halaman(route):
             ident = route.request.url.rsplit("/", 1)[-1]
             html = form + (submit if ident == "kirim" else "")
+            if ident == "kirim":
+                html = html.replace('<p>Assignment Berhasil DisubmitPerubahan Anda berhasil disimpan.</p>', '<h2>Assignment Berhasil Disubmit</h2><p>Perubahan Anda berhasil disimpan.</p>')
+                html = html.replace('<button>Tetap di Halaman</button>', '<button onclick="localStorage.setItem(\'sukses_ditutup\',\'1\')">Tetap di Halaman</button>')
             if ident == "beda":
                 html = html.replace(">USAHA CONTOH</div>", ">USAHA LAIN</div>")
             elif ident == "akses":
@@ -114,6 +121,7 @@ with TemporaryDirectory() as temp, patch("builtins.print") as output:
         assert "Kartu usaha tidak cocok" in rows[1][rows[0].index("catatan")]
         assert "Akses edit tidak tersedia" in rows[2][rows[0].index("catatan")]
         assert "Angka tidak valid" in rows[3][rows[0].index("catatan")]
+        assert context.pages[0].evaluate("localStorage.getItem('sukses_ditutup')") == "1"
         book.close()
         context.cookies()
         assert len(context.pages) == 1

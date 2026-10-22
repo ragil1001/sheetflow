@@ -164,7 +164,7 @@ def pesan_galat(page):
     return text
 
 def kirim(page):
-    sukses = page.get_by_text("Assignment Berhasil DisubmitPerubahan Anda berhasil disimpan.", exact=True)
+    sukses = page.get_by_text("Assignment Berhasil DisubmitPerubahan Anda berhasil disimpan.", exact=True).or_(page.get_by_role("button", name="Tetap di Halaman", exact=True)).filter(visible=True).first
     konfirmasi = page.get_by_role("button", name="Konfirmasi", exact=True).filter(visible=True)
     modal = page.locator(SELECTORS["modal"])
     # ponytail: Kirim aktif menandai siap mencoba lagi; gunakan respons API bila endpoint tersedia.
@@ -173,7 +173,8 @@ def kirim(page):
         try:
             if konfirmasi.is_visible():
                 konfirmasi.click()
-                page.wait_for_timeout(500)
+                with suppress(AssertionError):
+                    expect(sukses).to_be_visible(timeout=500)
                 tunggu_kirim(page, sukses.or_(awal).or_(modal))
             elif modal.is_visible():
                 galat = modal.get_by_role("button", name=re.compile(r"^Galat\s+[1-9]\d*\s+Perlu diperbaiki$"))
@@ -181,11 +182,13 @@ def kirim(page):
                 if detail:
                     return detail
                 modal.get_by_role("button", name="Kirim", exact=True).click()
-                page.wait_for_timeout(500)
+                with suppress(AssertionError):
+                    expect(sukses).to_be_visible(timeout=500)
                 tunggu_kirim(page, konfirmasi.or_(sukses).or_(awal))
             else:
                 awal.click()
-                page.wait_for_timeout(500)
+                with suppress(AssertionError):
+                    expect(sukses).to_be_visible(timeout=500)
                 tunggu_kirim(page, modal.or_(konfirmasi).or_(sukses).or_(awal))
         except (Error, AssertionError):
             if page.is_closed() or gangguan(page).is_visible():
