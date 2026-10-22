@@ -6,7 +6,7 @@ from contextlib import suppress
 from decimal import Decimal, InvalidOperation
 from math import ceil
 from pathlib import Path
-from time import monotonic, sleep
+from time import monotonic
 from urllib.parse import quote
 from camoufox.fingerprints import from_fpgen, generate_fingerprint
 from camoufox.sync_api import Camoufox
@@ -69,7 +69,7 @@ def buka_usaha(page, target):
     cards = page.locator(SELECTORS["kartu_usaha"])
     daftar = page.locator("#se2026_nested")
     kosong = daftar.get_by_text("Tidak ada data", exact=True).filter(visible=True)
-    expect(cards.first.or_(kosong).first, "Daftar kartu usaha BLOK II tidak muncul").to_be_visible(timeout=0)
+    expect(cards.first.or_(kosong).first, "Daftar kartu usaha BLOK II tidak muncul").to_be_visible(timeout=TIMEOUT)
     if kosong.is_visible() and not cards.count():
         raise ValueError("Tidak ada kartu usaha pada assignment ini: " + target)
     ringkas = re.sub(r"\s*[(<].*$", "", target).strip()
@@ -99,14 +99,14 @@ def buka_usaha(page, target):
 def isi_remarks(page, field, text):
     wadah = field.locator('xpath=ancestor::*[contains(@id, "#")][1]')
     tombol = wadah.locator(r'button.tw\:size-8.tw\:relative.tw\:text-primary.tw\:\@lg\/form\:flex\!.tw\:hidden:visible:has(> svg.tw\:size-4)')
-    expect(tombol, "Tombol catatan pada input yang diubah tidak ditemukan/unik").to_have_count(1, timeout=0)
+    expect(tombol, "Tombol catatan pada input yang diubah tidak ditemukan/unik").to_have_count(1, timeout=TIMEOUT)
     tombol.click()
     editor = page.get_by_placeholder("Tambah catatan di sini...", exact=True).filter(visible=True)
     editor.fill(text)
-    expect(editor).to_have_value(text, timeout=0)
+    expect(editor).to_have_value(text, timeout=TIMEOUT)
     page.get_by_role("button", name="Simpan", exact=True).click()
     page.get_by_role("button", name="Dismiss", exact=True).click()
-    expect(editor).to_be_hidden(timeout=0)
+    expect(editor).to_be_hidden(timeout=TIMEOUT)
 
 def angka(value):
     if value is None or not str(value).strip():
@@ -144,7 +144,7 @@ def sukses_kirim(page):
 def tunggu_kirim(page, tujuan):
     gagal = page.get_by_text(re.compile(r"\bpre[\s_-]?signed[\s_-]*url\b", re.I)).filter(visible=True).first
     sukses = sukses_kirim(page)
-    expect(tujuan.filter(visible=True).or_(gagal).or_(sukses).first).to_be_visible(timeout=0)
+    expect(tujuan.filter(visible=True).or_(gagal).or_(sukses).first).to_be_visible(timeout=TIMEOUT)
     if sukses.is_visible():
         return
     assert not gagal.is_visible(), "Kirim gagal: FASIH menampilkan kesalahan presigned URL; hasil kirim belum dipastikan"
@@ -155,12 +155,13 @@ def pesan_galat(page):
     if sukses_kirim(page).is_visible():
         return ""
     tombol = modal.get_by_role("button", name=re.compile(r"^Galat\s+[1-9]\d*\s+Perlu diperbaiki$"))
-    if not tombol.count():
-        return ""
-    tombol.click(timeout=200)
     rincian = page.locator(SELECTORS["modal"]).filter(has=page.get_by_text(re.compile(r"^Total:\s*\d+\s*/\s*\d+$")))
+    if not rincian.count():
+        if not tombol.count():
+            return ""
+        tombol.click(timeout=1000)
     pesan = rincian.locator(r"ul.tw\:text-destructive > li")
-    expect(pesan.first.or_(sukses_kirim(page)).first).to_be_visible(timeout=0)
+    expect(pesan.first.or_(sukses_kirim(page)).first).to_be_visible(timeout=TIMEOUT)
     if sukses_kirim(page).is_visible():
         return ""
     lines = []
@@ -173,38 +174,65 @@ def pesan_galat(page):
     assert text and len(text) <= 32767, "Pesan Galat kosong atau melebihi batas sel Excel"
     return text
 
-def kirim(page):
+def kirim(page, pulih=None):
     sukses = sukses_kirim(page)
     konfirmasi = page.get_by_role("button", name="Konfirmasi", exact=True).filter(visible=True)
     modal = page.locator(SELECTORS["modal"])
-    awal = page.locator("body").filter(has_not=modal).get_by_role("button", name="Kirim", exact=True).filter(visible=True).and_(page.locator(":enabled"))
+    galat = modal.get_by_role("button", name=re.compile(r"^Galat\s+[1-9]\d*\s+Perlu diperbaiki$")).filter(visible=True)
+    rincian = modal.filter(has=page.get_by_text(re.compile(r"^Total:\s*\d+\s*/\s*\d+$")))
+    awal = page.locator("body").filter(has_not=modal).get_by_role("button", name="Kirim", exact=True).filter(visible=True)
     terakhir, waktu = None, 0
+    terlihat, lapor = None, monotonic()
     while not sukses.is_visible():
+        if pulih is not None and pulih():
+            raise Error("Kirim terputus oleh hard refresh; periksa hasil sebelum mengirim kembali.")
         try:
-            expect(page.locator("body")).to_be_visible(timeout=0)
+            expect(page.locator("body")).to_be_visible(timeout=TIMEOUT)
+            if pulih is not None and pulih():
+                continue
             if sukses.is_visible():
                 break
-            if konfirmasi.is_visible():
-                tahap, tombol = "konfirmasi", konfirmasi
-            elif modal.is_visible():
-                galat = modal.get_by_role("button", name=re.compile(r"^Galat\s+[1-9]\d*\s+Perlu diperbaiki$"))
-                detail = pesan_galat(page) if galat.count() else ""
-                if detail:
-                    return detail
-                tahap, tombol = "modal", modal.get_by_role("button", name="Kirim", exact=True)
+            tombol = None
+            if rincian.count():
+                tahap = "rincian Galat"
+                if rincian.locator(r"ul.tw\:text-destructive > li").first.is_visible():
+                    detail = pesan_galat(page)
+                    if detail:
+                        return detail
+            elif galat.count():
+                tahap, tombol = "buka Galat", galat
+            elif konfirmasi.is_visible():
+                tahap, tombol = "Konfirmasi Kirim", konfirmasi
+            elif modal.count():
+                tahap = "menunggu rincian Galat" if terakhir == "buka Galat" else "Kirim pada modal validasi"
+                if terakhir != "buka Galat":
+                    tombol = modal.last.get_by_role("button", name="Kirim", exact=True)
             else:
-                tahap, tombol = "awal", awal
+                tahap, tombol = "Kirim awal", awal
             if sukses.is_visible():
                 break
-            # ponytail: tombol aktif menandai request selesai; batasi pengulangan tahap sama menjadi sekali/detik.
-            if tombol.is_visible() and tombol.is_enabled() and (tahap != terakhir or monotonic() - waktu >= 1):
-                tombol.click(timeout=200)
-                terakhir, waktu = tahap, monotonic()
+            status = tahap
+            if tombol is not None:
+                if not tombol.is_visible():
+                    status += ": tombol belum terlihat/loading"
+                elif not tombol.is_enabled():
+                    status += ": tombol belum aktif/loading"
+                # ponytail: tombol aktif menandai request selesai; batasi pengulangan tahap sama menjadi sekali/detik.
+                elif tahap != terakhir or monotonic() - waktu >= 1:
+                    tombol.click(timeout=1000)
+                    terakhir, waktu = tahap, monotonic()
+                    status += ": diklik, menunggu respons"
         except (Error, AssertionError) as error:
             if page.is_closed() or re.search(r"NS_ERROR_UNKNOWN_HOST|ERR_NAME_NOT_RESOLVED", str(error)):
                 raise
+            if isinstance(error, AssertionError) and "timeout" not in str(error).lower():
+                raise
+            status = "Menunggu tampilan siap: " + str(error).splitlines()[0][:160]
         if sukses.is_visible():
             break
+        if status != terlihat or monotonic() - lapor >= 5:
+            print("  [KIRIM] " + status, flush=True)
+            terlihat, lapor = status, monotonic()
         page.wait_for_timeout(100)
     return ""
 
@@ -231,20 +259,30 @@ def gangguan(page):
     bot = page.get_by_text(PESAN_BOT).and_(page.locator(':not(#se2026_nested [data-nested-view="true"], #se2026_nested [data-nested-view="true"] *, [id^="nama_usaha_edit#"], [id^="nama_usaha_edit#"] *)'))
     return bot.filter(visible=True).first
 
-def pasang_refresh(page, restart=None):
+def pasang_refresh(page, pulih=None):
     pesan = gangguan(page)
     refresh = page.get_by_role("button", name="Refresh Page", exact=True).filter(visible=True)
     def ulang():
-        print("  [BOT] Restart browser.", flush=True)
-        if restart is not None:
-            restart()
-        if len(page.context.pages) == 1:
-            page.context.new_page()
-        page.close()
+        print("  [BOT] Hard refresh di tab yang sama.", flush=True)
+        if pulih is not None:
+            pulih()
+        page.wait_for_timeout(1000)
+        try:
+            with page.expect_navigation(wait_until="domcontentloaded", timeout=TIMEOUT):
+                # ponytail: reload(true) khusus Firefox/Camoufox; gunakan API bypass-cache bila pindah browser.
+                page.evaluate("() => location.reload(true)")
+        except Error as error:
+            if page.is_closed() or re.search(r"NS_ERROR_UNKNOWN_HOST|ERR_NAME_NOT_RESOLVED", str(error)):
+                raise
     page.remove_locator_handler(pesan)
-    page.add_locator_handler(pesan, ulang, times=1, no_wait_after=True)
+    page.add_locator_handler(pesan, ulang, no_wait_after=True)
     page.remove_locator_handler(refresh)
-    page.add_locator_handler(refresh, lambda: refresh.evaluate_all("buttons => buttons.find(b => !b.disabled)?.click()"), no_wait_after=True)
+    def refresh_web():
+        if refresh.evaluate_all("buttons => { const b = buttons.find(b => !b.disabled); if (!b) return false; b.click(); return true; }"):
+            print("  [REFRESH] Tombol web diklik; memeriksa ulang halaman.", flush=True)
+            if pulih is not None:
+                pulih()
+    page.add_locator_handler(refresh, refresh_web, no_wait_after=True)
 
 def jeda(cfg, sisa):
     sisa -= 1
@@ -261,7 +299,7 @@ def hitung_mundur(page, waktu, label="Istirahat batch"):
         if tersisa == 0:
             print(" - lanjut.")
             return
-        expect(page.locator("body")).to_be_visible(timeout=0)
+        expect(page.locator("body")).to_be_visible(timeout=TIMEOUT)
         page.wait_for_timeout(min(1000, tersisa * 1000))
 
 def jalankan(pemulihan=False):
@@ -315,24 +353,24 @@ def jalankan(pemulihan=False):
     headless = False
     print(f"[MULAI] {len(rows)} baris; headless={headless}. Membuka browser dan memuat sesi tersimpan.", flush=True)
     with Camoufox(persistent_context=True, user_data_dir=str(root / ".fasih-profile"), fingerprint=fingerprint, i_know_what_im_doing=True, headless=headless, humanize=True, os="windows", locale="id-ID", timeout=TIMEOUT) as browser:
-        browser.set_default_timeout(0)
-        browser.set_default_navigation_timeout(0)
-        terblokir = False
-        def restart_bot():
-            nonlocal terblokir
-            terblokir = True
+        browser.set_default_timeout(TIMEOUT)
+        browser.set_default_navigation_timeout(TIMEOUT)
+        dimuat_ulang = False
+        def pulih_bot():
+            nonlocal dimuat_ulang
+            dimuat_ulang = True
         def tab_baru(tab):
             try:
                 if len(browser.pages) > 2:
                     tab.close()
                 elif not tab.is_closed():
-                    pasang_refresh(tab, restart_bot)
+                    pasang_refresh(tab, pulih_bot)
             except Error:
                 if not tab.is_closed():
                     raise
         browser.on("page", tab_baru)
         for tab in browser.pages:
-            pasang_refresh(tab, restart_bot)
+            pasang_refresh(tab, pulih_bot)
         page = browser.pages[0] if browser.pages else browser.new_page()
         for tab in browser.pages:
             if tab != page:
@@ -345,7 +383,8 @@ def jalankan(pemulihan=False):
                 if not dibuka:
                     dibuka = True
                     page.goto("https://fasih-sm.bps.go.id/app/surveys?page=0&perPage=10&layout=list", wait_until="commit")
-                expect(page.locator("body")).to_be_visible(timeout=0)
+                expect(page.locator("body")).to_be_visible(timeout=TIMEOUT)
+                expect(gangguan(page)).to_be_hidden(timeout=TIMEOUT)
                 if not pemulihan:
                     input("Pemeriksaan awal selesai; tekan Enter untuk mulai... " if headless else "Setelah halaman Survei terbuka, tekan Enter di terminal... ")
                     pemulihan = True
@@ -356,18 +395,12 @@ def jalankan(pemulihan=False):
             except (Error, AssertionError, StopIteration) as error:
                 if re.search(r"NS_ERROR_UNKNOWN_HOST|ERR_NAME_NOT_RESOLVED", str(error)):
                     raise
-                if terblokir:
-                    with suppress(Error):
-                        sesi(browser, page, root / ".fasih-profile" / "sesi.json", simpan=True)
-                    browser.remove_listener("page", tab_baru)
-                    book.close()
-                    return True
                 if page.is_closed():
                     raise
                 page.wait_for_timeout(100)
         print("[SESI] Halaman Survei terbuka. Mulai memeriksa assignment.", flush=True)
         hasil = dict.fromkeys(("SUCCESS", "NO_CHANGE", "ERROR"), 0)
-        ulang_browser = False
+        dimuat_ulang = False
         sisa = random.randint(cfg["batch_min"], cfg["batch_max"])
         for index, (number, row, values) in enumerate(rows):
             print(f"[{index + 1}/{len(rows)}] Baris Excel {number}: {row['target_usaha']}", flush=True)
@@ -375,7 +408,6 @@ def jalankan(pemulihan=False):
             simpan(book, path)
             assignment = page
             result, note = "ERROR", ""
-            ulang = False
             kirim_ulang = "Kirim belum selesai" in str(row.get("catatan") or "")
             tahap = "Membuka assignment detail"
             print("  " + tahap, flush=True)
@@ -383,6 +415,9 @@ def jalankan(pemulihan=False):
             dalam_edit = False
             while True:
                 try:
+                    if dimuat_ulang:
+                        dimuat_ulang = False
+                        dalam_edit = False
                     if isinstance(values, Exception):
                         raise values
                     if not detail_dibuka:
@@ -390,19 +425,22 @@ def jalankan(pemulihan=False):
                         for tab in browser.pages:
                             if tab != assignment:
                                 tab.close()
-                        pasang_refresh(page, restart_bot)
+                        pasang_refresh(page, pulih_bot)
                         page.goto("https://fasih-sm.bps.go.id/app/assignment-detail/" + quote(row["id_fasih"], safe=""), wait_until="commit")
                     if page == assignment:
                         tahap = "Membuka tab Review"
                         print("  " + tahap, flush=True)
                         review = assignment.get_by_role("button", name="Review", exact=True)
-                        expect(review).to_be_visible(timeout=0)
-                        with assignment.expect_popup(timeout=0) as popup:
+                        expect(review).to_be_visible(timeout=TIMEOUT)
+                        with assignment.expect_popup(timeout=TIMEOUT) as popup:
                             review.click(no_wait_after=True)
                         page = popup.value
                     tahap = "Menunggu Ringkasan"
                     print("  " + tahap, flush=True)
-                    expect(page.get_by_role("button", name="Ringkasan", exact=True).or_(sukses_kirim(page)).first).to_be_visible(timeout=0)
+                    siap = page.get_by_role("button", name="Ringkasan", exact=True).or_(sukses_kirim(page))
+                    if dalam_edit:
+                        siap = siap.or_(page.locator(SELECTORS["blok_ii"]))
+                    expect(siap.first).to_be_visible(timeout=TIMEOUT)
                     if sukses_kirim(page).is_visible():
                         result = "SUCCESS"
                     else:
@@ -433,15 +471,17 @@ def jalankan(pemulihan=False):
                         break
                     if changed:
                         tahap = "Revoke dan konfirmasi"
+                        kirim_ulang = True
                         revoke.click()
                         page.locator(SELECTORS["konfirmasi_revoke"]).click()
-                        kirim_ulang = True
                     tahap = "Membuka Edit"
                     print("  " + tahap, flush=True)
+                    if not dalam_edit or changed:
+                        expect(edit).to_be_visible(timeout=TIMEOUT)
                     if edit.is_visible():
                         edit.click(no_wait_after=True)
                         dalam_edit = True
-                        expect(edit).to_be_hidden(timeout=0)
+                        expect(edit).to_be_hidden(timeout=TIMEOUT)
                     tahap = "Membuka BLOK II"
                     page.locator(SELECTORS["blok_ii"]).click()
                     tahap = "BLOK II: membuka usaha " + row["target_usaha"]
@@ -474,16 +514,18 @@ def jalankan(pemulihan=False):
                     print("  " + tahap, flush=True)
                     page.locator(SELECTORS["catatan"]).click()
                     switch = page.locator(SELECTORS["switch"])
-                    expect(switch).to_have_count(1, timeout=0)
+                    expect(switch).to_have_count(1, timeout=TIMEOUT)
                     if switch.get_attribute("aria-checked") == "false":
                         kirim_ulang = True
                         page.locator(SELECTORS["kontrol_switch"]).click()
                         changed = True
-                    expect(switch).to_have_attribute("aria-checked", "true", timeout=0)
+                    expect(switch).to_have_attribute("aria-checked", "true", timeout=TIMEOUT)
+                    if dimuat_ulang:
+                        continue
                     if changed or kirim_ulang:
                         tahap = "Kirim: membuka dan membaca validasi"
                         print("  " + tahap, flush=True)
-                        detail = kirim(page)
+                        detail = kirim(page, pulih=lambda: dimuat_ulang)
                         if detail:
                             cell = sheet.cell(number, keterangan, detail)
                             cell.data_type = "s"
@@ -504,23 +546,24 @@ def jalankan(pemulihan=False):
                         sheet.cell(number, status, "RETRY")
                         simpan(book, path)
                         raise
-                    if terblokir:
-                        ulang = True
-                        note = tahap + (" | Kirim belum selesai; BOT, ulang otomatis." if tahap.startswith("Kirim:") else " | BOT; ulang otomatis.")
-                        break
                     if result != "ERROR":
                         break
+                    if dimuat_ulang:
+                        if page.is_closed():
+                            raise
+                        continue
                     if isinstance(error, (ValueError, InvalidOperation)) or (isinstance(error, AssertionError) and "timeout" not in error_text.lower()):
                         note = f"{tahap} | {type(error).__name__}: {error_text}"
                         break
                     if page.is_closed():
                         raise
+                    print("  [TUNGGU] " + tahap + " | " + error_text.splitlines()[0][:160], flush=True)
                     page.wait_for_timeout(100)
             for tab in browser.pages:
                 if tab != assignment and not tab.is_closed() and len(browser.pages) > 1:
                     with suppress(Error):
                         tab.close()
-            sheet.cell(number, status, "RETRY" if ulang and result == "ERROR" else result)
+            sheet.cell(number, status, result)
             if note:
                 cell = sheet.cell(number, catatan)
                 text = str(cell.value or "")
@@ -533,40 +576,23 @@ def jalankan(pemulihan=False):
             print(f"  [HASIL] {sheet.cell(number, status).value}; progres disimpan.", flush=True)
             if note:
                 print("  [CATATAN] " + note.splitlines()[0], flush=True)
-            if ulang:
-                with suppress(Error):
-                    sesi(browser, assignment, root / ".fasih-profile" / "sesi.json", simpan=True)
-                ulang_browser = True
-                break
             page = assignment
-            try:
-                page.bring_to_front()
-                if index + 1 < len(rows):
-                    istirahat = sisa == 1
-                    waktu, sisa = jeda(cfg, sisa)
-                    if istirahat:
-                        hitung_mundur(page, waktu)
-                    else:
-                        print(f"  Jeda {waktu / 1000:.1f} detik sebelum baris berikutnya.", flush=True)
-                        page.wait_for_timeout(waktu)
-            except Error:
-                if not terblokir:
-                    raise
-                ulang_browser = True
-                break
+            page.bring_to_front()
+            if index + 1 < len(rows):
+                istirahat = sisa == 1
+                waktu, sisa = jeda(cfg, sisa)
+                if istirahat:
+                    hitung_mundur(page, waktu)
+                else:
+                    print(f"  Jeda {waktu / 1000:.1f} detik sebelum baris berikutnya.", flush=True)
+                    page.wait_for_timeout(waktu)
         else:
             print(f"[SELESAI] SUCCESS={hasil['SUCCESS']}, NO_CHANGE={hasil['NO_CHANGE']}, ERROR={hasil['ERROR']}.", flush=True)
     browser.remove_listener("page", tab_baru)
     book.close()
-    return ulang_browser
 
 def main():
-    pemulihan = False
-    while True:
-        if not jalankan(pemulihan=pemulihan):
-            return
-        pemulihan = True
-        sleep(2)
+    jalankan()
 
 if __name__ == "__main__":
     main()
