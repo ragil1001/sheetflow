@@ -11,7 +11,7 @@ from camoufox.sync_api import Camoufox
 from openpyxl import Workbook, load_workbook
 from playwright.sync_api import Error, expect
 
-from fasih import FIELDS, PESAN_BOT, buka_usaha, identitas, jalankan, kirim, main, pasang_refresh, pesan_galat, sesi
+from fasih import FIELDS, PESAN_BOT, buka_usaha, identitas, inputan, jalankan, kirim, main, pasang_refresh, pesan_galat, sesi
 
 
 @contextmanager
@@ -85,7 +85,7 @@ with TemporaryDirectory() as temp, web_lokal() as (url, pages), patch("builtins.
         sheet.title = "Sheet1"
         sheet.append(["id_fasih", "target_usaha", *FIELDS, "status", "catatan"])
         for ident, nama, value in rows:
-            sheet.append([ident, nama, *[value if key == "tk_laki_laki" else None for key in FIELDS], "TODO"])
+            sheet.append([ident, nama, *[value.get(key) if isinstance(value, dict) else value if key == "tk_laki_laki" else None for key in FIELDS], "TODO"])
         book.save(root / "uji.xlsx")
         book.close()
 
@@ -198,6 +198,14 @@ with TemporaryDirectory() as temp, web_lokal() as (url, pages), patch("builtins.
                 html = '<p>Loading...</p><template>' + form + '</template><script>setTimeout(()=>{document.body.innerHTML=document.querySelector("template").innerHTML},300)</script>'
             elif ident == "galat":
                 html = form + validasi
+            elif ident.startswith("putus_"):
+                html = '<section id="editor">' + form + '</section>' + (validasi if ident == "putus_galat" else submit)
+                html = html.replace('onclick="this.disabled=true;', 'onclick="document.querySelector(\'#editor\').hidden=true;this.disabled=true;')
+                html = html.replace('onclick="this.hidden=true;', 'onclick="document.querySelector(\'#editor\').hidden=true;this.hidden=true;')
+            elif ident == "urutan":
+                inputs = ''.join('<label>' + label + '<input value="0" oninput="localStorage.setItem(\'urutan\',(localStorage.getItem(\'urutan\')||\'\')+\'' + column + ',\')"></label>' for column, label in FIELDS.items())
+                html = form.replace('<label>Pekerja laki-laki<input value="0"></label>', inputs) + submit
+                html = html.replace('<div title="CATATAN">', '<div title="CATATAN" onclick="localStorage.setItem(\'urutan\',localStorage.getItem(\'urutan\')+\'CATATAN,\')">')
             elif ident == "edit_lambat":
                 html = form.replace('<button onclick="this.hidden=true">', '<button id="edit" hidden onclick="this.hidden=true;document.querySelector(\'.fasih-form-sidebar\').hidden=false;document.querySelector(\'button\').hidden=true">')
                 html = html.replace('<div class="fasih-form-sidebar">', '<div class="fasih-form-sidebar" hidden>')
@@ -229,6 +237,129 @@ with TemporaryDirectory() as temp, web_lokal() as (url, pages), patch("builtins.
         book.close()
         context.cookies()
         assert len(context.pages) == 1
+        workbook([("putus_" + tahap, "USAHA CONTOH", 1) for tahap in ("awal", "modal", "konfirmasi", "galat")])
+        terputus = set()
+        def lanjut_kirim(tab, pulih=None):
+            tahap = tab.url.rsplit("_", 1)[-1]
+            if tahap not in terputus:
+                terputus.add(tahap)
+                tujuan = {"awal": "#awal", "modal": '#m:not([hidden])', "konfirmasi": '#k:not([hidden])', "galat": '#validasi:not([hidden])'}[tahap]
+                if tahap == "awal":
+                    tab.locator("#awal").click()
+                    tab.wait_for_timeout(50)
+                else:
+                    for _ in range(12):
+                        if tab.locator(tujuan).is_visible():
+                            break
+                        tab.get_by_role("button", name="Kirim", exact=True).filter(visible=True).click()
+                        tab.wait_for_timeout(50)
+                    assert tab.locator(tujuan).is_visible(), "Fixture tahap Kirim tidak terbuka"
+                    if tahap == "galat":
+                        tab.get_by_role("button", name="Galat 3 Perlu diperbaiki", exact=True).click()
+                raise Error("Kirim terputus sementara; tampilan pengiriman masih terbuka")
+            return kirim(tab, pulih=pulih)
+        def cek_tunggu(*args, **kwargs):
+            text = " ".join(map(str, args))
+            if "[TUNGGU]" in text and "Kirim:" not in text:
+                raise RuntimeError("Tampilan Kirim aktif tetapi skrip kembali menunggu tahap form")
+        with patch("fasih.__file__", str(root / "fasih.py")), patch("fasih.TIMEOUT", 500), patch("fasih.Camoufox", return_value=nullcontext(context)), \
+             patch("builtins.input", return_value=""), patch("fasih.kirim", side_effect=lanjut_kirim), patch("builtins.print", side_effect=cek_tunggu):
+            main()
+        book = load_workbook(root / "uji.xlsx")
+        rows = list(book["Sheet1"].values)
+        assert terputus == {"awal", "modal", "konfirmasi", "galat"}
+        assert [row[rows[0].index("status")] for row in rows[1:]] == ["SUCCESS", "SUCCESS", "SUCCESS", "ERROR"], rows
+        assert rows[4][rows[0].index("keterangan")] == detail_galat
+        book.close()
+        workbook([("urutan", "USAHA CONTOH", dict.fromkeys(FIELDS, 1))])
+        gagal_input = []
+        def input_terputus(tab, label):
+            field = inputan(tab, label)
+            if label == FIELDS["perbaikan_biaya_pembelian"]:
+                tekan_asli = field.press
+                def tekan(key):
+                    if not gagal_input:
+                        gagal_input.append(True)
+                        raise Error("Timeout sesudah mengisi biaya pembelian")
+                    tekan_asli(key)
+                field.press = tekan
+            return field
+        with patch("fasih.__file__", str(root / "fasih.py")), patch("fasih.TIMEOUT", 1000), patch("fasih.Camoufox", return_value=nullcontext(context)), \
+             patch("builtins.input", return_value=""), patch("fasih.inputan", side_effect=input_terputus), patch("builtins.print") as output:
+            main()
+            assert sum("Memeriksa tampilan form/pengiriman" in str(c) for c in output.call_args_list) == 1, "Gangguan satu input mengulang pemeriksaan form"
+        urutan = list(FIELDS)
+        urutan.insert(7, "perbaikan_biaya_pembelian")
+        assert context.pages[0].evaluate("localStorage.getItem('urutan')") == ",".join([*urutan, "CATATAN", ""])
+        assert gagal_input == [True]
+        book = load_workbook(root / "uji.xlsx")
+        assert book["Sheet1"].cell(2, len(FIELDS) + 3).value == "SUCCESS"
+        book.close()
+        workbook([("lanjut", "USAHA CONTOH", None)])
+        context.route("https://fasih-sm.bps.go.id/app/home", lambda r: r.fulfill(content_type="text/html", body="Beranda"))
+        pemeriksaan_login = []
+        def selesai_login(c):
+            pemeriksaan_login.append(True)
+            if len(pemeriksaan_login) < 3:
+                return None
+            if len(pemeriksaan_login) == 3:
+                c.pages[0].goto("https://fasih-sm.bps.go.id/app/home")
+            return c.pages[0]
+        with patch("fasih.__file__", str(root / "fasih.py")), patch("fasih.TIMEOUT", 1000), patch("fasih.Camoufox", return_value=nullcontext(context)), \
+             patch("fasih.tab_survei", side_effect=selesai_login), patch("builtins.input", return_value="") as masuk:
+            main()
+            masuk.assert_called_once()
+        assert len(pemeriksaan_login) == 3
+        pulih_requests = {}
+        def halaman_pulih(ident):
+            pulih_requests[ident] = pulih_requests.get(ident, 0) + 1
+            jumlah = pulih_requests[ident]
+            if jumlah == 2:
+                return "<p>Bot Detected</p>"
+            pemicu, mode = ident.split("_")
+            if jumlah == 3 and mode in ("home", "surveys"):
+                return '<script>location.replace("https://fasih-sm.bps.go.id/app/' + mode + '")</script>'
+            assert jumlah <= (4 if mode in ("home", "surveys") else 3), "Form terus direfresh setelah BOT hilang"
+            html = form.replace('input value="0"', 'input id="laki" value="1"' if jumlah >= 3 else 'input id="laki" value="0"')
+            html += '<label>Pekerja perempuan<input id="perempuan" value="0"></label>'
+            html = html.replace('<input role="switch" aria-checked="true">', '<input role="switch" aria-checked="false"><div id="uji-control" onclick="this.previousElementSibling.setAttribute(\'aria-checked\',\'true\')">Aktifkan</div>')
+            if jumlah == 3 and mode == "edit":
+                html = html.replace('<button onclick="this.hidden=true"><svg class="tabler-icon-edit" width="24" height="24"></svg></button>', "")
+            html += ('<button id="awal" onclick="kirimTahap(\'awal\')">Kirim</button><section id="m" hidden>' + modal +
+                     '<button onclick="kirimTahap(\'modal\')">Kirim</button></div></section>'
+                     '<section id="k" hidden><p>Konfirmasi Kirim</p><button onclick="kirimTahap(\'konfirmasi\')">Konfirmasi</button></section>'
+                     '<section id="s" hidden><h2>Assignment Berhasil Disubmit</h2><button>Tetap di Halaman</button></section>'
+                     '<script>const diisi={};document.querySelectorAll("#laki,#perempuan").forEach(input=>input.addEventListener("input",()=>{diisi[input.id]=true;'
+                     + ('if(input.id==="perempuan")document.body.innerHTML="<p>Bot Detected</p>";' if jumlah == 1 and pemicu == "input" else '') + '}));'
+                     'function kirimTahap(tahap){'
+                     + ('if(tahap===' + json.dumps(pemicu) + '){document.body.innerHTML="<p>Bot Detected</p>";return;}' if jumlah == 1 else '') +
+                     'if(tahap==="awal"){document.querySelector("#awal").hidden=true;document.querySelector("#m").hidden=false;}'
+                     'else if(tahap==="modal"){document.querySelector("#m").hidden=true;document.querySelector("#k").hidden=false;}'
+                     'else{localStorage.setItem(' + json.dumps(ident) + ',JSON.stringify({diisi,laki:document.querySelector("#laki").value,perempuan:document.querySelector("#perempuan").value,switch:document.querySelector("[role=switch]").getAttribute("aria-checked")}));document.querySelector("#k").hidden=true;document.querySelector("#s").hidden=false;}}</script>')
+            return html
+        ids_pulih = [pemicu + "_" + mode for pemicu in ("input", "awal", "modal", "konfirmasi") for mode in ("review", "edit")] + ["konfirmasi_home", "konfirmasi_surveys"]
+        for ident in ids_pulih:
+            pages["/form/pulih/" + ident] = lambda ident=ident: halaman_pulih(ident)
+        context.route("**/app/assignment-detail/pulih-*", lambda r: r.fulfill(content_type="text/html", body='<button onclick="window.open(\'' + url + '/form/pulih/' + r.request.url.rsplit('pulih-', 1)[-1] + '\')">Review</button>'))
+        context.route("https://fasih-sm.bps.go.id/app/home", lambda r: r.fulfill(content_type="text/html", body="Beranda"))
+        workbook([("pulih-" + ident, "USAHA CONTOH", {"tk_laki_laki": 1, "tk_perempuan": 2}) for ident in ids_pulih])
+        context.route(url + "/**", lambda r: r.continue_())
+        def cek_pulih(*args, **kwargs):
+            if "[TUNGGU]" in " ".join(map(str, args)) and "Memeriksa tampilan" in " ".join(map(str, args)):
+                raise RuntimeError("BOT sudah hilang tetapi tahap form tidak dikenali")
+        with patch("fasih.__file__", str(root / "fasih.py")), patch("fasih.TIMEOUT", 1500), patch("fasih.Camoufox", return_value=nullcontext(context)), \
+             patch("builtins.input", return_value="") as masuk, patch("builtins.print", side_effect=cek_pulih):
+            main()
+            masuk.assert_called_once()
+        book = load_workbook(root / "uji.xlsx")
+        rows = list(book["Sheet1"].values)
+        assert all(row[rows[0].index("status")] == "SUCCESS" for row in rows[1:]), rows
+        assert pulih_requests == {ident: 4 if ident.endswith(("home", "surveys")) else 3 for ident in ids_pulih}
+        tersimpan = {item["name"]: item["value"] for origin in context.storage_state()["origins"] if origin["origin"] == url for item in origin["localStorage"]}
+        for ident in ids_pulih:
+            data = json.loads(tersimpan[ident])
+            assert data == {"diisi": {"laki": True, "perempuan": True}, "laki": "1", "perempuan": "2", "switch": "true"}, (ident, data)
+        book.close()
         diterima = []
         def terkirim():
             if diterima:
@@ -284,4 +415,4 @@ with TemporaryDirectory() as temp, web_lokal() as (url, pages), patch("builtins.
     assert book["Sheet1"].cell(2, len(FIELDS) + 3).value == "NO_CHANGE"
     book.close()
 
-print("Pemeriksaan kartu, klik/rincian Galat dan Excel, Kirim berulang, akses edit, dan hard refresh BOT lulus.")
+print("Pemeriksaan urutan input, Galat/Excel, resume Kirim, isi ulang setelah BOT, dan pemulihan tanpa Enter ulang lulus.")
