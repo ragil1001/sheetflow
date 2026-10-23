@@ -64,6 +64,19 @@ def inputan(page, label):
     field = page.get_by_label(pattern).and_(page.locator("xpath=//" + inputs))
     return field.or_(rows.locator(f"xpath=self::*[count(.//{inputs})=1]//{inputs}")).filter(visible=True)
 
+def input_excel(page, column, value, pulih):
+    field = inputan(page, FIELDS[column])
+    try:
+        expect(field).to_have_count(1, timeout=TIMEOUT_CARI_USAHA)
+    except AssertionError as error:
+        if page.is_closed() or pulih() or gangguan(page).is_visible() or posisi_stabil(page) not in ("form", "revoke"):
+            raise
+        if column == "perbaikan_biaya_pembelian" and value == 0 and field.count() == 0:
+            print("  [SKIP] Biaya pembelian: Excel 0, input tidak tersedia; tanpa remarks.", flush=True)
+            return None
+        raise ValueError("Input tidak tersedia/unik: " + FIELDS[column]) from error
+    return field
+
 def buka_usaha(page, target):
     target = " ".join(target.split())
     cards = page.locator(SELECTORS["kartu_usaha"])
@@ -141,6 +154,54 @@ def identitas(path):
 def sukses_kirim(page):
     return page.get_by_text(re.compile(r"Assignment\s+Berhasil\s+Disubmit", re.I)).or_(page.get_by_role("button", name="Tetap di Halaman", exact=True)).filter(visible=True).first
 
+def tampilan_kirim(page):
+    modal = page.locator(SELECTORS["modal"])
+    return modal.filter(has=page.get_by_role("button", name=re.compile(r"^(?:Kirim|Konfirmasi|Galat\s+[1-9]\d*\s+Perlu diperbaiki)$"))).or_(
+        modal.filter(has=page.get_by_text(re.compile(r"^Total:\s*\d+\s*/\s*\d+$")))).or_(
+        page.get_by_text("Konfirmasi Kirim", exact=True).filter(visible=True))
+
+def input_aktif(page):
+    fields = page.locator(SELECTORS["switch"])
+    for label in FIELDS.values():
+        fields = fields.or_(inputan(page, label))
+    return fields.and_(page.locator(':enabled:not([readonly]):not([aria-disabled="true"])')).filter(visible=True)
+
+def posisi(page):
+    if sukses_kirim(page).is_visible():
+        return "sukses"
+    if page.locator(SELECTORS["konfirmasi_revoke"]).is_visible():
+        return "konfirmasi revoke"
+    if tampilan_kirim(page).count():
+        return "pengiriman"
+    if page.get_by_role("button", name="Review", exact=True).filter(visible=True).count():
+        return "detail assignment"
+    if page.locator(SELECTORS["revoke"]).is_visible():
+        return "revoke"
+    if page.locator(SELECTORS["edit"]).is_visible():
+        return "edit"
+    kirim_awal = page.get_by_role("button", name="Kirim", exact=True).filter(visible=True).count()
+    if page.locator(SELECTORS["blok_ii"]).is_visible() and (input_aktif(page).count() or kirim_awal or not page.get_by_role("button", name="Ringkasan", exact=True).filter(visible=True).count()):
+        return "form"
+    if kirim_awal:
+        return "kirim awal"
+    if page.get_by_role("button", name="Ringkasan", exact=True).filter(visible=True).count():
+        return "ringkasan"
+    if halaman_awal(page):
+        return "survei/beranda"
+    return "memuat"
+
+def posisi_stabil(page):
+    # ponytail: dua pembacaan menyaring glitch singkat; gunakan sinyal render selesai jika tersedia.
+    sebelum = posisi(page)
+    akhir = monotonic() + TIMEOUT / 1000
+    while monotonic() < akhir:
+        page.wait_for_timeout(100)
+        sekarang = posisi(page)
+        if sekarang == sebelum:
+            return sekarang
+        sebelum = sekarang
+    raise Error("Tampilan masih berubah; periksa ulang posisi halaman.")
+
 def tunggu_kirim(page, tujuan):
     gagal = page.get_by_text(re.compile(r"\bpre[\s_-]?signed[\s_-]*url\b", re.I)).filter(visible=True).first
     sukses = sukses_kirim(page)
@@ -186,6 +247,12 @@ def kirim(page, pulih=None):
     while not sukses.is_visible():
         if pulih is not None and pulih():
             raise Error("Kirim terputus oleh refresh; periksa ulang form dan hasil kirim.")
+        akses = page.locator(SELECTORS["konfirmasi_revoke"]).or_(page.locator(SELECTORS["revoke"])).or_(page.locator(SELECTORS["edit"]))
+        kembali = terakhir in ("Kirim pada modal validasi", "Konfirmasi Kirim") and awal.count() and awal.is_enabled()
+        if akses.count() or kembali or (not awal.count() and not modal.count() and not konfirmasi.count()):
+            sekarang = posisi_stabil(page)
+            if sekarang not in ("pengiriman", "kirim awal", "memuat", "sukses"):
+                raise Error("Tampilan Kirim berubah menjadi " + sekarang + "; tentukan ulang aksi.")
         try:
             expect(page.locator("body")).to_be_visible(timeout=TIMEOUT)
             if pulih is not None and pulih():
@@ -232,6 +299,9 @@ def kirim(page, pulih=None):
             if page.is_closed() or re.search(r"NS_ERROR_UNKNOWN_HOST|ERR_NAME_NOT_RESOLVED", str(error)):
                 raise
             if isinstance(error, AssertionError) and "timeout" not in str(error).lower():
+                raise
+            sekarang = posisi_stabil(page)
+            if sekarang not in ("pengiriman", "kirim awal", "memuat", "sukses"):
                 raise
             status = "Menunggu tampilan siap: " + str(error).splitlines()[0][:160]
         if sukses.is_visible():
@@ -313,6 +383,7 @@ def hitung_mundur(page, waktu, label="Istirahat batch"):
         page.wait_for_timeout(min(1000, tersisa * 1000))
 
 def ulang_langkah(page, tahap, aksi, pulih):
+    semula = posisi(page)
     while True:
         if pulih():
             raise Error("Halaman direfresh; ulangi pengisian dari awal.")
@@ -321,10 +392,17 @@ def ulang_langkah(page, tahap, aksi, pulih):
             if pulih():
                 raise Error("Halaman direfresh; ulangi pengisian dari awal.")
             return hasil
-        except (Error, AssertionError) as error:
+        except (Error, AssertionError, ValueError) as error:
             if pulih() or page.is_closed() or re.search(r"NS_ERROR_UNKNOWN_HOST|ERR_NAME_NOT_RESOLVED", str(error)):
                 raise
             if isinstance(error, AssertionError) and "timeout" not in str(error).lower():
+                raise
+            sekarang = posisi_stabil(page)
+            if sekarang != semula:
+                raise Error(f"Tampilan berubah dari {semula} ke {sekarang}; tentukan ulang aksi.") from error
+            if sekarang == "ringkasan":
+                raise Error("Akses edit tidak tersedia; buka ulang Review dari detail assignment.") from error
+            if isinstance(error, ValueError):
                 raise
             print("  [TUNGGU] " + tahap + " | " + str(error).splitlines()[0][:160], flush=True)
             page.wait_for_timeout(100)
@@ -388,7 +466,7 @@ def jalankan(pemulihan=False):
             dimuat_ulang = True
         def tab_baru(tab):
             try:
-                if len(browser.pages) > 2:
+                if sum(not p.is_closed() for p in browser.pages) > 2:
                     tab.close()
                 elif not tab.is_closed():
                     pasang_refresh(tab, pulih_bot)
@@ -445,21 +523,18 @@ def jalankan(pemulihan=False):
             tahap = "Membuka assignment detail"
             print("  " + tahap, flush=True)
             detail_dibuka = False
-            dalam_edit = False
-            dalam_kirim = False
             isi_ulang = False
             while True:
                 try:
                     if dimuat_ulang:
                         dimuat_ulang = False
-                        dalam_kirim = False
                         isi_ulang = True
                         print("  [PULIH] Mengenali ulang tampilan setelah refresh.", flush=True)
                     if isinstance(values, Exception):
                         raise values
                     if (detail_dibuka or page != assignment) and halaman_awal(page):
                         assignment = page
-                        detail_dibuka = dalam_edit = dalam_kirim = False
+                        detail_dibuka = False
                         isi_ulang = True
                         print("  [PULIH] Survei/Beranda terbuka; membuka kembali assignment yang sama.", flush=True)
                     if not detail_dibuka:
@@ -469,47 +544,62 @@ def jalankan(pemulihan=False):
                                 tab.close()
                         pasang_refresh(page, pulih_bot)
                         page.goto("https://fasih-sm.bps.go.id/app/assignment-detail/" + quote(row["id_fasih"], safe=""), wait_until="commit")
-                    if page == assignment:
-                        tahap = "Membuka tab Review"
-                        print("  " + tahap, flush=True)
-                        review = assignment.get_by_role("button", name="Review", exact=True)
-                        expect(review).to_be_visible(timeout=TIMEOUT)
-                        with assignment.expect_popup(timeout=TIMEOUT) as popup:
-                            review.click(no_wait_after=True)
-                        page = popup.value
+                    review = page.get_by_role("button", name="Review", exact=True).filter(visible=True)
                     tahap = "Memeriksa tampilan form/pengiriman"
                     print("  " + tahap, flush=True)
                     ringkasan = page.get_by_role("button", name="Ringkasan", exact=True).filter(visible=True)
                     revoke, edit = page.locator(SELECTORS["revoke"]), page.locator(SELECTORS["edit"])
                     blok = page.locator(SELECTORS["blok_ii"])
-                    pengiriman = page.locator(SELECTORS["modal"]).or_(page.get_by_text("Konfirmasi Kirim", exact=True).filter(visible=True))
+                    pengiriman = tampilan_kirim(page)
+                    konfirmasi_revoke = page.locator(SELECTORS["konfirmasi_revoke"])
                     tombol_kirim = page.get_by_role("button", name="Kirim", exact=True).filter(visible=True)
-                    siap = ringkasan.or_(revoke).or_(edit).or_(blok).or_(pengiriman).or_(sukses_kirim(page))
-                    if dalam_kirim or kirim_ulang:
-                        siap = siap.or_(tombol_kirim)
+                    siap = ringkasan.or_(revoke).or_(edit).or_(blok).or_(pengiriman).or_(konfirmasi_revoke).or_(review).or_(sukses_kirim(page))
+                    siap = siap.or_(tombol_kirim)
                     ulang_langkah(page, tahap, lambda: expect(siap.first).to_be_visible(timeout=1000), lambda: dimuat_ulang or halaman_awal(page))
                     if dimuat_ulang:
                         continue
-                    lanjut_kirim = dalam_kirim or pengiriman.count() > 0 or (kirim_ulang and tombol_kirim.count() > 0 and not revoke.is_visible() and not edit.is_visible() and not blok.is_visible())
-                    if sukses_kirim(page).is_visible():
+                    sekarang = posisi_stabil(page)
+                    if dimuat_ulang or sekarang in ("memuat", "survei/beranda"):
+                        continue
+                    if sekarang == "detail assignment":
+                        if assignment != page and not assignment.is_closed():
+                            assignment.close()
+                        assignment = page
+                        print("  [POSISI] Detail assignment; membuka Review di tab aktif.", flush=True)
+                        tahap = "Membuka tab Review"
+                        with page.expect_popup(timeout=TIMEOUT) as popup:
+                            review.click(no_wait_after=True)
+                        page = popup.value
+                        continue
+                    if sekarang == "konfirmasi revoke":
+                        tahap = "Revoke dan konfirmasi"
+                        print("  [POSISI] Konfirmasi Revoke; melanjutkan konfirmasi.", flush=True)
+                        kirim_ulang = True
+                        konfirmasi_revoke.click()
+                        continue
+                    lanjut_kirim = sekarang in ("pengiriman", "kirim awal")
+                    if sekarang == "sukses":
+                        print("  [POSISI] Pengiriman sudah berhasil.", flush=True)
                         result = "SUCCESS"
                     elif not lanjut_kirim:
-                        dalam_edit = blok.is_visible() and not revoke.is_visible() and not edit.is_visible() and (dalam_edit or isi_ulang or not ringkasan.is_visible())
+                        dalam_edit = sekarang == "form"
+                        print("  [POSISI] " + ("Form edit aktif; memeriksa input." if dalam_edit else "Ringkasan/akses edit."), flush=True)
                         tahap = "Menunggu Revoke/Edit"
                         print("  " + tahap, flush=True)
-                        try:
-                            kontrol = revoke.or_(edit).or_(blok) if dalam_edit else revoke.or_(edit)
-                            expect(kontrol.first).to_be_visible(timeout=TIMEOUT)
-                        except AssertionError as error:
-                            if page.is_closed() or gangguan(page).is_visible():
-                                raise
-                            raise ValueError("Akses edit tidak tersedia: tidak ada tombol Revoke maupun Edit.") from error
+                        kontrol = revoke.or_(edit).or_(blok) if dalam_edit else revoke.or_(edit)
+                        expect(kontrol.first).to_be_visible(timeout=TIMEOUT)
                         changed = revoke.is_visible()
                         if changed and kirim_ulang:
                             tahap = "Memeriksa hasil Kirim sebelumnya"
                             blok.click()
                             buka_usaha(page, row["target_usaha"])
-                            sesuai = all(angka(inputan(page, label).input_value()) == values[column] for column, label in FIELDS.items() if values[column] is not None)
+                            sesuai = True
+                            for column in FIELDS:
+                                if values[column] is None:
+                                    continue
+                                field = input_excel(page, column, values[column], lambda: dimuat_ulang or halaman_awal(page))
+                                if field is not None and angka(field.input_value()) != values[column]:
+                                    sesuai = False
                             page.locator(SELECTORS["catatan"]).click()
                             if sesuai and page.locator(SELECTORS["switch"]).get_attribute("aria-checked") == "true":
                                 result = "SUCCESS"
@@ -525,7 +615,6 @@ def jalankan(pemulihan=False):
                                 expect(edit).to_be_visible(timeout=TIMEOUT)
                             if edit.is_visible():
                                 edit.click(no_wait_after=True)
-                                dalam_edit = True
                                 expect(edit).to_be_hidden(timeout=TIMEOUT)
                             tahap = "Membuka BLOK II"
                             ulang_langkah(page, tahap, lambda: page.locator(SELECTORS["blok_ii"]).click(), lambda: dimuat_ulang or halaman_awal(page))
@@ -540,13 +629,11 @@ def jalankan(pemulihan=False):
                                 diubah, perlu_catatan = False, False
                                 def isi_field():
                                     nonlocal kirim_ulang, changed, diubah, perlu_catatan
-                                    field = inputan(page, label)
-                                    try:
-                                        expect(field).to_have_count(1, timeout=TIMEOUT_CARI_USAHA)
-                                    except AssertionError as error:
-                                        if page.is_closed() or gangguan(page).is_visible() or dimuat_ulang:
-                                            raise
-                                        raise ValueError("Input tidak tersedia/unik: " + label) from error
+                                    field = input_excel(page, column, values[column], lambda: dimuat_ulang or halaman_awal(page))
+                                    if field is None:
+                                        return
+                                    if not field.is_editable():
+                                        raise Error("Input belum dapat diedit; periksa tampilan aktif.")
                                     berbeda = not field.input_value().strip() or angka(field.input_value()) != values[column]
                                     perlu_catatan = perlu_catatan or berbeda
                                     if berbeda or isi_ulang or diubah:
@@ -577,7 +664,6 @@ def jalankan(pemulihan=False):
                         if lanjut_kirim:
                             tahap = "Kirim: melanjutkan tampilan pengiriman"
                             print("  " + tahap, flush=True)
-                            dalam_kirim = True
                             kirim_ulang = True
                             detail = kirim(page, pulih=lambda: dimuat_ulang or halaman_awal(page))
                             if dimuat_ulang:
@@ -617,7 +703,19 @@ def jalankan(pemulihan=False):
                         break
                     if page.is_closed():
                         raise
-                    print("  [TUNGGU] " + tahap + " | " + error_text.splitlines()[0][:160], flush=True)
+                    sekarang = posisi_stabil(page)
+                    if sekarang == "ringkasan" or (tahap in ("Menunggu Revoke/Edit", "Revoke dan konfirmasi", "Membuka Edit") and sekarang in ("revoke", "edit", "konfirmasi revoke")):
+                        print("  [PULIH AKSES] Kembali ke detail assignment yang sama; membuka Review lagi.", flush=True)
+                        if page != assignment:
+                            page.close()
+                        if assignment.is_closed():
+                            assignment = browser.new_page()
+                        page = assignment
+                        page.bring_to_front()
+                        detail_dibuka = urlsplit(page.url).path == "/app/assignment-detail/" + quote(row["id_fasih"], safe="")
+                        isi_ulang = True
+                        continue
+                    print("  [TUNGGU] " + tahap + " | Posisi: " + sekarang + " | " + error_text.splitlines()[0][:160], flush=True)
                     page.wait_for_timeout(100)
             for tab in browser.pages:
                 if tab != assignment and not tab.is_closed() and len(browser.pages) > 1:

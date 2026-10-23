@@ -11,7 +11,7 @@ from camoufox.sync_api import Camoufox
 from openpyxl import Workbook, load_workbook
 from playwright.sync_api import Error, expect
 
-from fasih import FIELDS, PESAN_BOT, buka_usaha, identitas, inputan, jalankan, kirim, main, pasang_refresh, pesan_galat, sesi
+from fasih import FIELDS, PESAN_BOT, buka_usaha, identitas, inputan, jalankan, kirim, main, pasang_refresh, pesan_galat, sesi, ulang_langkah
 
 
 @contextmanager
@@ -79,13 +79,13 @@ with TemporaryDirectory() as temp, web_lokal() as (url, pages), patch("builtins.
     cfg = dict(excel_file="uji.xlsx", sheet_name="Sheet1", delay_min=0, delay_max=0, batch_min=20, batch_max=20, rest_min=0, rest_max=0)
     (root / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
 
-    def workbook(rows):
+    def workbook(rows, remarks=None):
         book = Workbook()
         sheet = book.active
         sheet.title = "Sheet1"
-        sheet.append(["id_fasih", "target_usaha", *FIELDS, "status", "catatan"])
+        sheet.append(["id_fasih", "target_usaha", *FIELDS, "status", "catatan", "remarks"])
         for ident, nama, value in rows:
-            sheet.append([ident, nama, *[value.get(key) if isinstance(value, dict) else value if key == "tk_laki_laki" else None for key in FIELDS], "TODO"])
+            sheet.append([ident, nama, *[value.get(key) if isinstance(value, dict) else value if key == "tk_laki_laki" else None for key in FIELDS], "TODO", None, remarks])
         book.save(root / "uji.xlsx")
         book.close()
 
@@ -187,7 +187,13 @@ with TemporaryDirectory() as temp, web_lokal() as (url, pages), patch("builtins.
         assert not tab.is_closed() and tab.locator("body").get_attribute("data-refresh") == "3"
         tab.close()
 
-        context.route("**/app/assignment-detail/*", lambda r: r.fulfill(content_type="text/html", body='<button onclick="window.open(\'/form/' + r.request.url.rsplit('/', 1)[-1] + '\')">Review</button>'))
+        detail_requests = []
+        def detail_assignment(route):
+            ident = route.request.url.rsplit('/', 1)[-1]
+            detail_requests.append(ident)
+            route.fulfill(content_type="text/html", body='<button onclick="window.open(\'/form/' + ident + '\')">Review</button>')
+        context.route("**/app/assignment-detail/*", detail_assignment)
+        akses_requests, glitch_requests = [], {}
         def halaman(route):
             ident = route.request.url.rsplit("/", 1)[-1]
             html = form + (submit if ident == "kirim" else "")
@@ -202,31 +208,60 @@ with TemporaryDirectory() as temp, web_lokal() as (url, pages), patch("builtins.
                 html = '<section id="editor">' + form + '</section>' + (validasi if ident == "putus_galat" else submit)
                 html = html.replace('onclick="this.disabled=true;', 'onclick="document.querySelector(\'#editor\').hidden=true;this.disabled=true;')
                 html = html.replace('onclick="this.hidden=true;', 'onclick="document.querySelector(\'#editor\').hidden=true;this.hidden=true;')
+                if ident == "putus_form":
+                    html = form + submit
             elif ident == "urutan":
                 inputs = ''.join('<label>' + label + '<input value="0" oninput="localStorage.setItem(\'urutan\',(localStorage.getItem(\'urutan\')||\'\')+\'' + column + ',\')"></label>' for column, label in FIELDS.items())
-                html = form.replace('<label>Pekerja laki-laki<input value="0"></label>', inputs) + submit
+                html = form.replace('<label>Pekerja laki-laki<input value="0"></label>', inputs) + submit.replace("a++<3", "false").replace("b++<2", "false").replace("c++<2", "false")
                 html = html.replace('<div title="CATATAN">', '<div title="CATATAN" onclick="localStorage.setItem(\'urutan\',localStorage.getItem(\'urutan\')+\'CATATAN,\')">')
+            elif ident.startswith("pembelian-"):
+                html = form
+                field = '<label>Biaya pembelian barang yang terjual<input value="9" oninput="localStorage.setItem(\'' + ident + '\',this.value)"></label>'
+                if ident in ("pembelian-ada0", "pembelian-ada1"):
+                    html += field + submit
+                elif ident == "pembelian-lambat0":
+                    html += '<section id="pembelian" hidden>' + field + '</section><script>setTimeout(()=>document.querySelector("#pembelian").hidden=false,150)</script>' + submit
+                elif ident == "pembelian-duplikat0":
+                    html += field * 2
             elif ident == "edit_lambat":
                 html = form.replace('<button onclick="this.hidden=true">', '<button id="edit" hidden onclick="this.hidden=true;document.querySelector(\'.fasih-form-sidebar\').hidden=false;document.querySelector(\'button\').hidden=true">')
                 html = html.replace('<div class="fasih-form-sidebar">', '<div class="fasih-form-sidebar" hidden>')
                 html += ('<button onclick="document.querySelector(\'#revoke\').hidden=false"><svg class="tabler-icon-rotate-clockwise" width="24" height="24"></svg></button>'
                          '<div id="revoke" role="alertdialog" hidden>Revoke Assignment?<button onclick="this.parentElement.hidden=true;document.querySelector(\'.tabler-icon-rotate-clockwise\').parentElement.hidden=true;setTimeout(()=>document.querySelector(\'#edit\').hidden=false,300)">Konfirmasi</button></div>' + submit)
+            elif ident.startswith("glitch-"):
+                glitch_requests[ident] = glitch_requests.get(ident, 0) + 1
+                html = form + submit.replace("a++<3", "false").replace("b++<2", "false").replace("c++<2", "false")
+                html = html.replace('onclick="this.hidden=true"><svg class="tabler-icon-edit"', 'onclick="this.hidden=true;document.querySelectorAll(\'label,[role=switch]\').forEach(e=>e.hidden=false)"><svg class="tabler-icon-edit"')
+                if ident in ("glitch-ringkasan", "glitch-ringkasan-timeout"):
+                    jeda_form = 40 if ident == "glitch-ringkasan" else 350
+                    html = '<button>Ringkasan</button><section id="isi" hidden>' + html + '</section><script>setTimeout(()=>document.querySelector("#isi").hidden=false,' + str(jeda_form) + ')</script>'
+                elif glitch_requests[ident] == 1 and ident in ("glitch-edit", "glitch-revoke", "glitch-konfirmasi"):
+                    if ident != "glitch-edit":
+                        html = html.replace("tabler-icon-edit", "tabler-icon-rotate-clockwise")
+                    html += '<script>document.querySelector("svg").parentElement.disabled=true</script>'
+                    if ident == "glitch-konfirmasi":
+                        html += '<div role="alertdialog">Revoke Assignment?<button disabled>Konfirmasi</button></div>'
             if ident == "beda":
                 html = html.replace(">USAHA CONTOH</div>", ">USAHA LAIN</div>")
             elif ident == "akses":
-                html = html.replace('<button onclick="this.hidden=true"><svg class="tabler-icon-edit" width="24" height="24"></svg></button>', "")
+                akses_requests.append(True)
+                if len(akses_requests) == 1:
+                    html = html.replace('<button onclick="this.hidden=true"><svg class="tabler-icon-edit" width="24" height="24"></svg></button>', "")
+                    html = html.replace('input value="0"', 'input readonly value="0"')
+                    html = html.replace('input role="switch"', 'input disabled role="switch"')
             route.fulfill(content_type="text/html", body=html)
         context.route("**/form/*", halaman)
         workbook([("beda", "USAHA CONTOH", None), ("akses", "USAHA CONTOH", None), ("angka", "USAHA CONTOH", -1), ("lanjut", "USAHA CONTOH (PEMILIK A)", None), ("lambat", "USAHA CONTOH", None), ("galat", "USAHA CONTOH", 1), ("kirim", "USAHA CONTOH", 1), ("edit_lambat", "USAHA CONTOH", 1)])
         with patch("fasih.__file__", str(root / "fasih.py")), patch("fasih.TIMEOUT", 1000), patch("fasih.TIMEOUT_CARI_USAHA", 50), \
-             patch("fasih.Camoufox", side_effect=[nullcontext(context)]), patch("builtins.input", return_value=""), patch("builtins.print") as output:
+             patch("fasih.Camoufox", side_effect=[nullcontext(context)]), patch("builtins.input", return_value=""), patch("builtins.print") as output, \
+             patch("playwright.sync_api.Page.reload", side_effect=AssertionError("Akses gagal direfresh, bukan membuka Review ulang")):
             main()
-            assert not any("[TUNGGU]" in str(c) for c in output.call_args_list), "Edit lambat menyebabkan langkah salah/timeout"
+            assert not any("[TUNGGU]" in str(c) and "Kirim:" not in str(c) for c in output.call_args_list), "Edit lambat menyebabkan langkah salah/timeout"
         book = load_workbook(root / "uji.xlsx")
         rows = list(book["Sheet1"].values)
-        assert [row[rows[0].index("status")] for row in rows[1:]] == ["ERROR", "ERROR", "ERROR", "NO_CHANGE", "NO_CHANGE", "ERROR", "SUCCESS", "SUCCESS"], rows
+        assert [row[rows[0].index("status")] for row in rows[1:]] == ["ERROR", "NO_CHANGE", "ERROR", "NO_CHANGE", "NO_CHANGE", "ERROR", "SUCCESS", "SUCCESS"], rows
         assert "Kartu usaha tidak cocok" in rows[1][rows[0].index("catatan")]
-        assert "Akses edit tidak tersedia" in rows[2][rows[0].index("catatan")]
+        assert len(akses_requests) == 2 and detail_requests.count("akses") == 1, "Pemulihan akses tidak membuka Review dari detail yang sama"
         assert "Angka tidak valid" in rows[3][rows[0].index("catatan")]
         assert rows[6][rows[0].index("keterangan")] == detail_galat
         assert rows[6][rows[0].index("catatan")] == "Galat validasi Kirim: " + detail_galat
@@ -237,12 +272,92 @@ with TemporaryDirectory() as temp, web_lokal() as (url, pages), patch("builtins.
         book.close()
         context.cookies()
         assert len(context.pages) == 1
-        workbook([("putus_" + tahap, "USAHA CONTOH", 1) for tahap in ("awal", "modal", "konfirmasi", "galat")])
+        glitches = ["ringkasan", "ringkasan-timeout", "edit", "revoke", "konfirmasi", "input", "usaha", "catatan", "akses-input", "akses-usaha", "akses-catatan", "akses-kirim"]
+        workbook([("glitch-" + mode, "USAHA CONTOH", 1) for mode in glitches])
+        gangguan_input, gangguan_usaha, gangguan_catatan = [], [], []
+        akses_hilang = set()
+        def input_glitch(tab, label):
+            field = inputan(tab, label)
+            if tab.url.endswith("glitch-input") and label == FIELDS["tk_laki_laki"]:
+                fill = field.fill
+                def isi(value):
+                    if not gangguan_input:
+                        gangguan_input.append(True)
+                        tab.evaluate("document.querySelector('label').hidden=true;document.querySelector('.tabler-icon-edit').parentElement.hidden=false")
+                        raise Error("Timeout input; tampilan kembali ke akses Edit")
+                    fill(value)
+                field.fill = isi
+            if tab.url.endswith("glitch-akses-input") and label == FIELDS["tk_laki_laki"]:
+                fill_asli = field.fill
+                def isi_akses(value):
+                    if "input" not in akses_hilang:
+                        akses_hilang.add("input")
+                        tab.set_content('<button>Ringkasan</button>')
+                        raise Error("Timeout input; akses menghilang")
+                    fill_asli(value)
+                field.fill = isi_akses
+            return field
+        def usaha_glitch(tab, target):
+            if tab.url.endswith("glitch-akses-usaha") and "usaha" not in akses_hilang:
+                akses_hilang.add("usaha")
+                tab.set_content('<button>Ringkasan</button>')
+                raise ValueError("Kartu menghilang karena akses menghilang")
+            if tab.url.endswith("glitch-usaha") and not gangguan_usaha:
+                gangguan_usaha.append(True)
+                tab.set_content(validasi)
+                raise ValueError("Kartu usaha menghilang saat modal Galat terbuka")
+            return buka_usaha(tab, target)
+        def catatan_glitch(tab, tahap, aksi, pulih):
+            def langkah():
+                if tab.url.endswith("glitch-akses-catatan") and tahap.startswith("CATATAN") and "catatan" not in akses_hilang:
+                    akses_hilang.add("catatan")
+                    tab.set_content('<button>Ringkasan</button>')
+                    raise Error("Timeout CATATAN; akses menghilang")
+                if tab.url.endswith("glitch-catatan") and tahap.startswith("CATATAN") and not gangguan_catatan:
+                    gangguan_catatan.append(True)
+                    tab.evaluate("document.querySelector('.tabler-icon-edit').parentElement.hidden=false;document.querySelector('[role=switch]').hidden=true")
+                    raise Error("Timeout CATATAN; tampilan kembali ke akses Edit")
+                return aksi()
+            return ulang_langkah(tab, tahap, langkah, pulih)
+        def kirim_glitch(tab, pulih=None):
+            if tab.url.endswith("glitch-akses-kirim") and "kirim" not in akses_hilang:
+                akses_hilang.add("kirim")
+                tab.set_content('<button>Ringkasan</button>')
+            return kirim(tab, pulih=pulih)
+        def cek_glitch(*args, **kwargs):
+            if "Baris Excel" in " ".join(map(str, args)):
+                cek_glitch.log.clear()
+            cek_glitch.log.append(" ".join(map(str, args)))
+            if len(cek_glitch.log) > 100:
+                raise RuntimeError("Retry glitch tidak menentukan ulang aksi: " + "\n".join(cek_glitch.log[-12:]))
+        cek_glitch.log = []
+        with patch("fasih.__file__", str(root / "fasih.py")), patch("fasih.TIMEOUT", 500), patch("fasih.TIMEOUT_CARI_USAHA", 100), \
+             patch("fasih.Camoufox", return_value=nullcontext(context)), patch("builtins.input", return_value="") as masuk, \
+             patch("fasih.inputan", side_effect=input_glitch), patch("fasih.buka_usaha", side_effect=usaha_glitch), \
+             patch("fasih.ulang_langkah", side_effect=catatan_glitch), patch("fasih.kirim", side_effect=kirim_glitch), \
+             patch("playwright.sync_api.Page.reload", side_effect=AssertionError("Pemulihan akses memakai refresh")), patch("builtins.print", side_effect=cek_glitch):
+            try:
+                main()
+            except Error as error:
+                raise RuntimeError("\n".join(cek_glitch.log[-20:])) from error
+            masuk.assert_called_once()
+        book = load_workbook(root / "uji.xlsx")
+        rows = list(book["Sheet1"].values)
+        assert [row[rows[0].index("status")] for row in rows[1:]] == ["SUCCESS"] * 6 + ["ERROR"] + ["SUCCESS"] * 5, rows
+        assert rows[7][rows[0].index("keterangan")] == detail_galat
+        assert glitch_requests == {"glitch-" + mode: 2 if mode in ("edit", "revoke", "konfirmasi") or mode.startswith("akses-") else 1 for mode in glitches}, glitch_requests
+        assert all(detail_requests.count("glitch-" + mode) == 1 for mode in glitches), "Pemulihan akses meninggalkan detail ID FASIH semula"
+        assert akses_hilang == {"input", "usaha", "catatan", "kirim"}
+        assert gangguan_input == gangguan_usaha == gangguan_catatan == [True]
+        book.close()
+        workbook([("putus_" + tahap, "USAHA CONTOH", 1) for tahap in ("awal", "modal", "konfirmasi", "galat", "form")])
         terputus = set()
         def lanjut_kirim(tab, pulih=None):
             tahap = tab.url.rsplit("_", 1)[-1]
             if tahap not in terputus:
                 terputus.add(tahap)
+                if tahap == "form":
+                    raise Error("Kirim terputus sementara; form edit kembali aktif")
                 tujuan = {"awal": "#awal", "modal": '#m:not([hidden])', "konfirmasi": '#k:not([hidden])', "galat": '#validasi:not([hidden])'}[tahap]
                 if tahap == "awal":
                     tab.locator("#awal").click()
@@ -267,8 +382,8 @@ with TemporaryDirectory() as temp, web_lokal() as (url, pages), patch("builtins.
             main()
         book = load_workbook(root / "uji.xlsx")
         rows = list(book["Sheet1"].values)
-        assert terputus == {"awal", "modal", "konfirmasi", "galat"}
-        assert [row[rows[0].index("status")] for row in rows[1:]] == ["SUCCESS", "SUCCESS", "SUCCESS", "ERROR"], rows
+        assert terputus == {"awal", "modal", "konfirmasi", "galat", "form"}
+        assert [row[rows[0].index("status")] for row in rows[1:]] == ["SUCCESS", "SUCCESS", "SUCCESS", "ERROR", "SUCCESS"], rows
         assert rows[4][rows[0].index("keterangan")] == detail_galat
         book.close()
         workbook([("urutan", "USAHA CONTOH", dict.fromkeys(FIELDS, 1))])
@@ -287,7 +402,7 @@ with TemporaryDirectory() as temp, web_lokal() as (url, pages), patch("builtins.
         with patch("fasih.__file__", str(root / "fasih.py")), patch("fasih.TIMEOUT", 1000), patch("fasih.Camoufox", return_value=nullcontext(context)), \
              patch("builtins.input", return_value=""), patch("fasih.inputan", side_effect=input_terputus), patch("builtins.print") as output:
             main()
-            assert sum("Memeriksa tampilan form/pengiriman" in str(c) for c in output.call_args_list) == 1, "Gangguan satu input mengulang pemeriksaan form"
+            assert sum("Memeriksa tampilan form/pengiriman" in str(c) for c in output.call_args_list) == 2, "Gangguan satu input mengulang pemeriksaan form"
         urutan = list(FIELDS)
         urutan.insert(7, "perbaikan_biaya_pembelian")
         assert context.pages[0].evaluate("localStorage.getItem('urutan')") == ",".join([*urutan, "CATATAN", ""])
@@ -310,6 +425,21 @@ with TemporaryDirectory() as temp, web_lokal() as (url, pages), patch("builtins.
             main()
             masuk.assert_called_once()
         assert len(pemeriksaan_login) == 3
+        pembelian = [("kosong", None), ("hilang0", 0), ("hilang1", 5), ("ada0", 0), ("ada1", 5), ("lambat0", 0), ("duplikat0", 0)]
+        workbook([("pembelian-" + ident, "USAHA CONTOH", {"perbaikan_biaya_pembelian": value}) for ident, value in pembelian], remarks="Catatan uji")
+        with patch("fasih.__file__", str(root / "fasih.py")), patch("fasih.TIMEOUT", 1000), patch("fasih.TIMEOUT_CARI_USAHA", 300), \
+             patch("fasih.Camoufox", return_value=nullcontext(context)), patch("builtins.input", return_value=""), patch("fasih.isi_remarks") as catatan:
+            main()
+            assert catatan.call_count == 3, "Input tidak ada/kosong tetap diberi remarks"
+        book = load_workbook(root / "uji.xlsx")
+        rows = list(book["Sheet1"].values)
+        assert [row[rows[0].index("status")] for row in rows[1:]] == ["NO_CHANGE", "NO_CHANGE", "ERROR", "SUCCESS", "SUCCESS", "SUCCESS", "ERROR"], rows
+        assert "Input tidak tersedia/unik: Biaya pembelian" in rows[3][rows[0].index("catatan")]
+        assert "Input tidak tersedia/unik: Biaya pembelian" in rows[7][rows[0].index("catatan")]
+        assert context.pages[0].evaluate("localStorage.getItem('pembelian-ada0')") == "0"
+        assert context.pages[0].evaluate("localStorage.getItem('pembelian-ada1')") == "5"
+        assert context.pages[0].evaluate("localStorage.getItem('pembelian-lambat0')") == "0"
+        book.close()
         pulih_requests = {}
         def halaman_pulih(ident):
             pulih_requests[ident] = pulih_requests.get(ident, 0) + 1
@@ -319,12 +449,23 @@ with TemporaryDirectory() as temp, web_lokal() as (url, pages), patch("builtins.
             pemicu, mode = ident.split("_")
             if jumlah == 3 and mode in ("home", "surveys"):
                 return '<script>location.replace("https://fasih-sm.bps.go.id/app/' + mode + '")</script>'
-            assert jumlah <= (4 if mode in ("home", "surveys") else 3), "Form terus direfresh setelah BOT hilang"
+            if jumlah == 3 and mode == "detail":
+                return '<button onclick="window.open(\'/form/pulih/' + ident + '\')">Review</button>'
+            assert jumlah <= (4 if mode in ("home", "surveys", "detail") else 3), "Form terus direfresh setelah BOT hilang"
+            if jumlah == 3 and mode in ("awal", "modal", "konfirmasi", "galat", "sukses"):
+                if mode == "sukses":
+                    return '<h2>Assignment Berhasil Disubmit</h2><button>Tetap di Halaman</button>'
+                if mode == "galat":
+                    return validasi
+                return submit + '<script>' + {"awal": "", "modal": 'document.querySelector("#awal").hidden=true;document.querySelector("#m").hidden=false;', "konfirmasi": 'document.querySelector("#awal").hidden=true;document.querySelector("#k").hidden=false;'}[mode] + '</script>'
             html = form.replace('input value="0"', 'input id="laki" value="1"' if jumlah >= 3 else 'input id="laki" value="0"')
             html += '<label>Pekerja perempuan<input id="perempuan" value="0"></label>'
             html = html.replace('<input role="switch" aria-checked="true">', '<input role="switch" aria-checked="false"><div id="uji-control" onclick="this.previousElementSibling.setAttribute(\'aria-checked\',\'true\')">Aktifkan</div>')
             if jumlah == 3 and mode == "edit":
                 html = html.replace('<button onclick="this.hidden=true"><svg class="tabler-icon-edit" width="24" height="24"></svg></button>', "")
+            if jumlah == 3 and mode == "revoke":
+                html = html.replace('<button onclick="this.hidden=true">', '<button id="edit" hidden onclick="this.hidden=true">')
+                html += '<div role="alertdialog">Revoke Assignment?<button onclick="this.parentElement.hidden=true;document.querySelector(\'#edit\').hidden=false">Konfirmasi</button></div>'
             html += ('<button id="awal" onclick="kirimTahap(\'awal\')">Kirim</button><section id="m" hidden>' + modal +
                      '<button onclick="kirimTahap(\'modal\')">Kirim</button></div></section>'
                      '<section id="k" hidden><p>Konfirmasi Kirim</p><button onclick="kirimTahap(\'konfirmasi\')">Konfirmasi</button></section>'
@@ -337,7 +478,7 @@ with TemporaryDirectory() as temp, web_lokal() as (url, pages), patch("builtins.
                      'else if(tahap==="modal"){document.querySelector("#m").hidden=true;document.querySelector("#k").hidden=false;}'
                      'else{localStorage.setItem(' + json.dumps(ident) + ',JSON.stringify({diisi,laki:document.querySelector("#laki").value,perempuan:document.querySelector("#perempuan").value,switch:document.querySelector("[role=switch]").getAttribute("aria-checked")}));document.querySelector("#k").hidden=true;document.querySelector("#s").hidden=false;}}</script>')
             return html
-        ids_pulih = [pemicu + "_" + mode for pemicu in ("input", "awal", "modal", "konfirmasi") for mode in ("review", "edit")] + ["konfirmasi_home", "konfirmasi_surveys"]
+        ids_pulih = [pemicu + "_" + mode for pemicu in ("input", "awal", "modal", "konfirmasi") for mode in ("review", "edit")] + ["konfirmasi_" + mode for mode in ("home", "surveys", "detail", "revoke", "awal", "modal", "konfirmasi", "galat", "sukses")]
         for ident in ids_pulih:
             pages["/form/pulih/" + ident] = lambda ident=ident: halaman_pulih(ident)
         context.route("**/app/assignment-detail/pulih-*", lambda r: r.fulfill(content_type="text/html", body='<button onclick="window.open(\'' + url + '/form/pulih/' + r.request.url.rsplit('pulih-', 1)[-1] + '\')">Review</button>'))
@@ -353,10 +494,13 @@ with TemporaryDirectory() as temp, web_lokal() as (url, pages), patch("builtins.
             masuk.assert_called_once()
         book = load_workbook(root / "uji.xlsx")
         rows = list(book["Sheet1"].values)
-        assert all(row[rows[0].index("status")] == "SUCCESS" for row in rows[1:]), rows
-        assert pulih_requests == {ident: 4 if ident.endswith(("home", "surveys")) else 3 for ident in ids_pulih}
+        assert [row[rows[0].index("status")] for row in rows[1:]] == ["ERROR" if ident.endswith("_galat") else "SUCCESS" for ident in ids_pulih], rows
+        assert rows[ids_pulih.index("konfirmasi_galat") + 1][rows[0].index("keterangan")] == detail_galat
+        assert pulih_requests == {ident: 4 if ident.endswith(("home", "surveys", "detail")) else 3 for ident in ids_pulih}
         tersimpan = {item["name"]: item["value"] for origin in context.storage_state()["origins"] if origin["origin"] == url for item in origin["localStorage"]}
         for ident in ids_pulih:
+            if ident.rsplit("_", 1)[-1] in ("awal", "modal", "konfirmasi", "galat", "sukses"):
+                continue
             data = json.loads(tersimpan[ident])
             assert data == {"diisi": {"laki": True, "perempuan": True}, "laki": "1", "perempuan": "2", "switch": "true"}, (ident, data)
         book.close()
@@ -368,7 +512,9 @@ with TemporaryDirectory() as temp, web_lokal() as (url, pages), patch("builtins.
                 html = (form + '<button onclick="this.hidden=true;document.querySelector(\'#m\').hidden=false">Kirim</button>'
                         '<section id="m" hidden>' + modal + '<button onclick="document.querySelector(\'#m\').hidden=true;document.querySelector(\'#k\').hidden=false">Kirim</button></div></section>'
                         '<section id="k" hidden><p>Konfirmasi Kirim</p><button onclick="fetch(\'/terima\').then(()=>{document.body.innerHTML=\'<p>Bot Detected</p>\'})">Konfirmasi</button></section>')
-            return html.replace("<p>Bot Detected</p>", '<button onclick=location.reload()>Refresh Page</button>') if refresh_web else html
+            if pemulihan == "akses":
+                return html.replace("<p>Bot Detected</p>", '<button>Ringkasan</button>')
+            return html.replace("<p>Bot Detected</p>", '<button onclick=location.reload()>Refresh Page</button>') if pemulihan == "refresh" else html
         pages["/form/diterima"] = terkirim
         def terima_lokal():
             diterima.append(True)
@@ -376,10 +522,10 @@ with TemporaryDirectory() as temp, web_lokal() as (url, pages), patch("builtins.
         pages["/terima"] = terima_lokal
         context.route(url + "/**", lambda r: r.continue_())
         context.route("**/app/assignment-detail/diterima", lambda r: r.fulfill(content_type="text/html", body='<button onclick="window.open(\'' + url + '/form/diterima\')">Review</button>'))
-        for refresh_web in (False, True):
+        for pemulihan in ("bot", "refresh", "akses"):
             diterima.clear()
-            workbook([("diterima", "USAHA CONTOH", 1)])
-            with patch("fasih.__file__", str(root / "fasih.py")), patch("fasih.TIMEOUT", 1000), patch("fasih.Camoufox", return_value=nullcontext(context)), patch("builtins.input", return_value=""):
+            workbook([("diterima", "USAHA CONTOH", {"tk_laki_laki": 1, "perbaikan_biaya_pembelian": 0})])
+            with patch("fasih.__file__", str(root / "fasih.py")), patch("fasih.TIMEOUT", 1000), patch("fasih.TIMEOUT_CARI_USAHA", 50), patch("fasih.Camoufox", return_value=nullcontext(context)), patch("builtins.input", return_value=""):
                 assert jalankan() is None
             assert diterima == [True], "Kiriman yang sudah diterima dikirim ulang"
             book = load_workbook(root / "uji.xlsx")
@@ -415,4 +561,4 @@ with TemporaryDirectory() as temp, web_lokal() as (url, pages), patch("builtins.
     assert book["Sheet1"].cell(2, len(FIELDS) + 3).value == "NO_CHANGE"
     book.close()
 
-print("Pemeriksaan urutan input, Galat/Excel, resume Kirim, isi ulang setelah BOT, dan pemulihan tanpa Enter ulang lulus.")
+print("Pemeriksaan glitch/posisi aktif, buka ulang Review saat akses hilang, biaya pembelian/remarks, urutan input, Galat/Excel, dan pemulihan BOT lulus.")
