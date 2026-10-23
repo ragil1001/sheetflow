@@ -146,6 +146,11 @@ with TemporaryDirectory() as temp, web_lokal() as (url, pages), patch("builtins.
             assert input_excel(page, "perbaikan_biaya_pembelian", 0, lambda: False) is None
             with TestCase().assertRaisesRegex(ValueError, "Input tidak tersedia/unik"):
                 input_excel(page, "perbaikan_biaya_pembelian", 5, lambda: False)
+        page.set_content(form + '<div class="tw:rounded-lg tw:gap-2"><p>Biaya pembelian barang yang terjual</p>'
+            '<div class="tw:rounded-lg tw:gap-2"><p>Biaya operasional</p><input value="7"></div></div>')
+        with patch("fasih.expect", side_effect=AssertionError("Pembelian memakai assertion bertimeout")), \
+             patch.object(page, "wait_for_timeout", side_effect=AssertionError("Pembelian memakai delay")):
+            assert input_excel(page, "perbaikan_biaya_pembelian", 0, lambda: False) is None, "Input operasional disangka input pembelian"
         page.set_content(modal + '<button disabled>Kirim</button></div><script>setTimeout(()=>{document.body.innerHTML=\'<h2>Assignment Berhasil Disubmit</h2><button>Tetap di Halaman</button>\'},100)</script>')
         with patch.object(page, "reload", side_effect=AssertionError("Loading Kirim direfresh")):
             assert kirim(page) == "", "Kirim masih menunggu tombol pada modal lama"
@@ -238,12 +243,15 @@ with TemporaryDirectory() as temp, web_lokal() as (url, pages), patch("builtins.
             elif ident.startswith("pembelian-"):
                 html = form
                 field = '<label>Biaya pembelian barang yang terjual<input value="9" oninput="localStorage.setItem(\'' + ident + '\',this.value)"></label>'
-                if ident in ("pembelian-ada0", "pembelian-ada1"):
+                if ident in ("pembelian-ada0", "pembelian-ada1", "pembelian-lanjut"):
                     html += field + submit
                 elif ident == "pembelian-lambat0":
                     html += '<section id="pembelian" hidden>' + field + '</section><div id="memuat" role="progressbar">Loading</div><script>setTimeout(()=>{document.querySelector("#pembelian").hidden=false;document.querySelector("#memuat").hidden=true},500)</script>' + submit
                 elif ident == "pembelian-duplikat0":
                     html += field * 2
+                elif ident in ("pembelian-bersarang0", "pembelian-bersarang1"):
+                    html += '<div class="tw:rounded-lg tw:gap-2"><p>Biaya pembelian barang yang terjual</p>' \
+                        '<div class="tw:rounded-lg tw:gap-2"><p>Biaya operasional</p><input value="9" oninput="localStorage.setItem(\'' + ident + '\',this.value)"></div></div>' + submit
             elif ident == "edit_lambat":
                 html = form.replace('<button onclick="this.hidden=true">', '<button id="edit" hidden onclick="this.hidden=true;document.querySelector(\'.fasih-form-sidebar\').hidden=false;document.querySelector(\'button\').hidden=true">')
                 html = html.replace('<div class="fasih-form-sidebar">', '<div class="fasih-form-sidebar" hidden>')
@@ -358,7 +366,7 @@ with TemporaryDirectory() as temp, web_lokal() as (url, pages), patch("builtins.
             if len(cek_glitch.log) > 100:
                 raise RuntimeError("Retry glitch tidak menentukan ulang aksi: " + "\n".join(cek_glitch.log[-12:]))
         cek_glitch.log = []
-        with patch("fasih.__file__", str(root / "fasih.py")), patch("fasih.TIMEOUT", 500), patch("fasih.TIMEOUT_CARI_USAHA", 100), \
+        with patch("fasih.__file__", str(root / "fasih.py")), patch("fasih.TIMEOUT", 1500), patch("fasih.TIMEOUT_CARI_USAHA", 100), \
              patch("fasih.Camoufox", return_value=nullcontext(context)), patch("builtins.input", return_value="") as masuk, \
              patch("fasih.inputan", side_effect=input_glitch), patch("fasih.buka_usaha", side_effect=usaha_glitch), \
              patch("fasih.ulang_langkah", side_effect=catatan_glitch), patch("fasih.kirim", side_effect=kirim_glitch), \
@@ -452,20 +460,24 @@ with TemporaryDirectory() as temp, web_lokal() as (url, pages), patch("builtins.
             main()
             masuk.assert_called_once()
         assert len(pemeriksaan_login) == 3
-        pembelian = [("kosong", None), ("hilang0", 0), ("hilang1", 5), ("ada0", 0), ("ada1", 5), ("lambat0", 0), ("duplikat0", 0)]
-        workbook([("pembelian-" + ident, "USAHA CONTOH", {"perbaikan_biaya_pembelian": value}) for ident, value in pembelian], remarks="Catatan uji")
+        pembelian = [("kosong", None), ("hilang0", 0), ("hilang1", 5), ("ada0", 0), ("ada1", 5), ("lambat0", 0), ("duplikat0", 0), ("bersarang0", 0), ("bersarang1", 5), ("lanjut", 0)]
+        workbook([("pembelian-" + ident, "USAHA CONTOH", {"perbaikan_biaya_pembelian": value, **({"perbaikan_operasional": 8} if ident.startswith("bersarang") else {})}) for ident, value in pembelian], remarks="Catatan uji")
         with patch("fasih.__file__", str(root / "fasih.py")), patch("fasih.TIMEOUT", 1000), patch("fasih.TIMEOUT_CARI_USAHA", 300), \
              patch("fasih.Camoufox", return_value=nullcontext(context)), patch("builtins.input", return_value=""), patch("fasih.isi_remarks") as catatan:
             main()
-            assert catatan.call_count == 3, "Input tidak ada/kosong tetap diberi remarks"
+            assert catatan.call_count == 5, "Input tidak ada/kosong tetap diberi remarks atau kolom berikutnya tidak diproses"
         book = load_workbook(root / "uji.xlsx")
         rows = list(book["Sheet1"].values)
-        assert [row[rows[0].index("status")] for row in rows[1:]] == ["NO_CHANGE", "NO_CHANGE", "ERROR", "SUCCESS", "SUCCESS", "SUCCESS", "ERROR"], rows
+        assert [row[rows[0].index("status")] for row in rows[1:]] == ["NO_CHANGE", "NO_CHANGE", "ERROR", "SUCCESS", "SUCCESS", "SUCCESS", "ERROR", "SUCCESS", "ERROR", "SUCCESS"], rows
         assert "Input tidak tersedia/unik: Biaya pembelian" in rows[3][rows[0].index("catatan")]
         assert "Input tidak tersedia/unik: Biaya pembelian" in rows[7][rows[0].index("catatan")]
+        assert "Excel=5; input ditemukan=0" in rows[9][rows[0].index("catatan")]
         assert context.pages[0].evaluate("localStorage.getItem('pembelian-ada0')") == "0"
         assert context.pages[0].evaluate("localStorage.getItem('pembelian-ada1')") == "5"
         assert context.pages[0].evaluate("localStorage.getItem('pembelian-lambat0')") == "0"
+        assert context.pages[0].evaluate("localStorage.getItem('pembelian-bersarang0')") == "8", "Skip pembelian tidak melanjutkan biaya operasional"
+        assert context.pages[0].evaluate("localStorage.getItem('pembelian-bersarang1')") is None, "Pembelian hilang bernilai bukan nol tetap melanjutkan kolom"
+        assert context.pages[0].evaluate("localStorage.getItem('pembelian-lanjut')") == "0", "Error pembelian menghentikan data berikutnya"
         book.close()
         pulih_requests = {}
         def halaman_pulih(ident):

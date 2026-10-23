@@ -59,11 +59,16 @@ def inputan(page, label):
     prefix = r"(?:(?!\b(?:total|rincian|jumlah|subtotal|petunjuk|contoh|catatan|keterangan|akumulasi)\b)[\s\S])*?"
     pattern = re.compile(r"^" + prefix + r"\b(?:" + text + r")\b[\s\S]*$", re.I)
     inputs = 'input[not(@type) or @type="text" or @type="number" or @type="tel"]'
-    rows = page.get_by_text(pattern).filter(visible=True).locator(
-        "xpath=ancestor-or-self::div[contains(concat(' ', normalize-space(@class), ' '), ' tw:rounded-lg ') "
-        "and contains(concat(' ', normalize-space(@class), ' '), ' tw:gap-2 ')][1]")
+    wadah = "ancestor-or-self::div[contains(concat(' ', normalize-space(@class), ' '), ' tw:rounded-lg ') " \
+        "and contains(concat(' ', normalize-space(@class), ' '), ' tw:gap-2 ')][1]"
+    rows = page.get_by_text(pattern).filter(visible=True).locator("xpath=" + wadah)
     field = page.get_by_label(pattern).and_(page.locator("xpath=//" + inputs))
-    return field.or_(rows.locator(f"xpath=self::*[count(.//{inputs})=1]//{inputs}")).filter(visible=True)
+    kandidat = rows.locator(f"xpath=self::*[count(.//{inputs})=1]//{inputs}")
+    if label == FIELDS["perbaikan_biaya_pembelian"]:
+        # Judul tanpa input tidak boleh meminjam input dari pertanyaan bersarang.
+        kandidat = kandidat.locator("xpath=" + wadah).filter(has=page.get_by_text(pattern)).locator(
+            f"xpath=self::*[count(.//{inputs})=1]//{inputs}")
+    return field.or_(kandidat).filter(visible=True)
 
 def input_excel(page, column, value, pulih):
     field = inputan(page, FIELDS[column])
@@ -76,7 +81,7 @@ def input_excel(page, column, value, pulih):
         if jumlah == 0 and value == 0:
             print("  [SKIP] Biaya pembelian: Excel 0, input tidak tersedia; tanpa remarks.", flush=True)
             return None
-        raise ValueError("Input tidak tersedia/unik: " + FIELDS[column])
+        raise ValueError(f"Input tidak tersedia/unik: {FIELDS[column]} | Excel={value}; input ditemukan={jumlah}")
     try:
         expect(field).to_have_count(1, timeout=TIMEOUT_CARI_USAHA)
     except AssertionError as error:
@@ -636,13 +641,16 @@ def jalankan(pemulihan=False):
                                 if values[column] is None:
                                     continue
                                 tahap = "Mencari/mengisi " + label
-                                print("  " + tahap, flush=True)
+                                if column != "perbaikan_biaya_pembelian":
+                                    print("  " + tahap, flush=True)
                                 diubah, perlu_catatan = False, False
                                 def isi_field():
                                     nonlocal kirim_ulang, changed, diubah, perlu_catatan
                                     field = input_excel(page, column, values[column], lambda: dimuat_ulang or halaman_awal(page))
                                     if field is None:
                                         return
+                                    if column == "perbaikan_biaya_pembelian":
+                                        print(f"  Biaya pembelian: input tersedia; nilai Excel={values[column]}.", flush=True)
                                     if not field.is_editable():
                                         raise Error("Input belum dapat diedit; periksa tampilan aktif.")
                                     sebelum = field.input_value()
