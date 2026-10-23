@@ -11,7 +11,7 @@ from camoufox.sync_api import Camoufox
 from openpyxl import Workbook, load_workbook
 from playwright.sync_api import Error, expect
 
-from fasih import FIELDS, PESAN_BOT, buka_usaha, identitas, inputan, jalankan, kirim, main, pasang_refresh, pesan_galat, sesi, ulang_langkah
+from fasih import FIELDS, PESAN_BOT, buka_usaha, identitas, inputan, input_excel, jalankan, kirim, main, pasang_refresh, pesan_galat, sesi, ulang_langkah
 
 
 @contextmanager
@@ -114,6 +114,11 @@ with TemporaryDirectory() as temp, web_lokal() as (url, pages), patch("builtins.
         with patch("fasih.TIMEOUT", 1000):
             assert kirim(page) == ""
         assert page.evaluate("({...document.body.dataset})") == {"awal": "3", "modal": "2", "konfirmasi": "2"}
+        page.goto(page.url)
+        page.set_content(form + submit)
+        with patch.object(page, "reload", side_effect=AssertionError("Loading Kirim direfresh")):
+            assert kirim(page) == "", "Kirim/loading/ulang Kirim kembali ke alur Edit"
+        assert page.evaluate("({...document.body.dataset})") == {"awal": "3", "modal": "2", "konfirmasi": "2"}
         page.set_content('<button onclick="document.body.dataset.kirim=1">Kirim</button>' + modal + '<h2>Berhasil</h2><button>Tetap di Halaman</button></div>')
         with patch.object(page, "wait_for_timeout", side_effect=AssertionError("Sukses masih ditunggu")):
             assert kirim(page) == ""
@@ -125,6 +130,22 @@ with TemporaryDirectory() as temp, web_lokal() as (url, pages), patch("builtins.
         with patch("fasih.TIMEOUT", 50), patch.object(page, "wait_for_timeout", wraps=page.wait_for_timeout) as tunggu:
             assert kirim(page) == ""
             assert all(c.args[0] <= 100 for c in tunggu.call_args_list), "Sukses tertunda oleh jeda tetap"
+        for indikator in ('<div role="progressbar">Loading</div>', '<div class="tw:animate-spin">Loading</div>', ''):
+            page.set_content(form + '<button id="awal" onclick="this.hidden=true;document.querySelector(\'#konfirmasi\').hidden=false">Kirim</button>'
+                '<section id="konfirmasi" hidden><p>Konfirmasi Kirim</p><button onclick="this.parentElement.hidden=true;'
+                'document.querySelector(\'#tunggu\').hidden=false;setTimeout(()=>{document.querySelector(\'#tunggu\').hidden=true;'
+                'document.querySelector(\'#sukses\').hidden=false},600)">Konfirmasi</button></section><section id="tunggu" hidden>' + indikator + '</section>'
+                '<section id="sukses" hidden><h2>Assignment Berhasil Disubmit</h2><button>Tetap di Halaman</button></section>')
+            with patch("fasih.TIMEOUT", 200), patch.object(page, "reload", side_effect=AssertionError("Loading direfresh")), \
+                 patch.object(page, "wait_for_timeout", wraps=page.wait_for_timeout) as tunggu:
+                assert kirim(page) == "", "Form di belakang loading dikira kembali ke Edit"
+                assert all(c.args[0] <= 100 for c in tunggu.call_args_list), "Sukses loading tertunda oleh jeda tetap"
+        page.set_content(form)
+        with patch("fasih.expect", side_effect=AssertionError("Pembelian memakai assertion bertimeout")), \
+             patch.object(page, "wait_for_timeout", side_effect=AssertionError("Pembelian memakai delay")):
+            assert input_excel(page, "perbaikan_biaya_pembelian", 0, lambda: False) is None
+            with TestCase().assertRaisesRegex(ValueError, "Input tidak tersedia/unik"):
+                input_excel(page, "perbaikan_biaya_pembelian", 5, lambda: False)
         page.set_content(modal + '<button disabled>Kirim</button></div><script>setTimeout(()=>{document.body.innerHTML=\'<h2>Assignment Berhasil Disubmit</h2><button>Tetap di Halaman</button>\'},100)</script>')
         with patch.object(page, "reload", side_effect=AssertionError("Loading Kirim direfresh")):
             assert kirim(page) == "", "Kirim masih menunggu tombol pada modal lama"
@@ -220,7 +241,7 @@ with TemporaryDirectory() as temp, web_lokal() as (url, pages), patch("builtins.
                 if ident in ("pembelian-ada0", "pembelian-ada1"):
                     html += field + submit
                 elif ident == "pembelian-lambat0":
-                    html += '<section id="pembelian" hidden>' + field + '</section><script>setTimeout(()=>document.querySelector("#pembelian").hidden=false,150)</script>' + submit
+                    html += '<section id="pembelian" hidden>' + field + '</section><div id="memuat" role="progressbar">Loading</div><script>setTimeout(()=>{document.querySelector("#pembelian").hidden=false;document.querySelector("#memuat").hidden=true},500)</script>' + submit
                 elif ident == "pembelian-duplikat0":
                     html += field * 2
             elif ident == "edit_lambat":
@@ -257,6 +278,12 @@ with TemporaryDirectory() as temp, web_lokal() as (url, pages), patch("builtins.
              patch("playwright.sync_api.Page.reload", side_effect=AssertionError("Akses gagal direfresh, bukan membuka Review ulang")):
             main()
             assert not any("[TUNGGU]" in str(c) and "Kirim:" not in str(c) for c in output.call_args_list), "Edit lambat menyebabkan langkah salah/timeout"
+            logs = [str(c.args[0]) for c in output.call_args_list if c.args]
+            mulai_kirim = next(i for i, text in enumerate(logs) if "[7/8] Baris Excel" in text)
+            akhir_kirim = next(i for i, text in enumerate(logs) if "[8/8] Baris Excel" in text)
+            proses_kirim = logs[mulai_kirim:akhir_kirim]
+            assert sum("Membuka Edit" in text for text in proses_kirim) == 1, "Retry Kirim membuka Edit lagi"
+            assert sum("Memeriksa tampilan form/pengiriman" in text for text in proses_kirim) == 2, "Loading Kirim kembali memeriksa form"
         book = load_workbook(root / "uji.xlsx")
         rows = list(book["Sheet1"].values)
         assert [row[rows[0].index("status")] for row in rows[1:]] == ["ERROR", "NO_CHANGE", "ERROR", "NO_CHANGE", "NO_CHANGE", "ERROR", "SUCCESS", "SUCCESS"], rows

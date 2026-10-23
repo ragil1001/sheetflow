@@ -39,6 +39,7 @@ SELECTORS = {
     "catatan": '.fasih-form-sidebar:visible > div[title="CATATAN"]:visible',
     "switch": '#cek_anomali_button input[role="switch"]',
     "kontrol_switch": '#cek_anomali_button div[id$="-control"]',
+    "loading": '[aria-busy="true"]:visible, [role="progressbar"]:visible, .animate-spin:visible, [class~="tw:animate-spin"]:visible, [class~="tabler-icon-loader-2"]:visible',
     "modal": r'div.tw\:border\!.tw\:relative.tw\:flex.tw\:w-full.tw\:flex-col.tw\:gap-4.tw\:bg-background.tw\:p-6.tw\:pt-4.tw\:shadow-lg\!.tw\:sm\:rounded-lg:visible',
 }
 
@@ -66,14 +67,21 @@ def inputan(page, label):
 
 def input_excel(page, column, value, pulih):
     field = inputan(page, FIELDS[column])
+    if column == "perbaikan_biaya_pembelian":
+        if pulih() or gangguan(page).is_visible() or page.locator(SELECTORS["loading"]).count():
+            raise Error("Biaya pembelian: halaman masih memuat/berubah; periksa ulang tampilan.")
+        jumlah = field.count()
+        if jumlah == 1:
+            return field
+        if jumlah == 0 and value == 0:
+            print("  [SKIP] Biaya pembelian: Excel 0, input tidak tersedia; tanpa remarks.", flush=True)
+            return None
+        raise ValueError("Input tidak tersedia/unik: " + FIELDS[column])
     try:
         expect(field).to_have_count(1, timeout=TIMEOUT_CARI_USAHA)
     except AssertionError as error:
         if page.is_closed() or pulih() or gangguan(page).is_visible() or posisi_stabil(page) not in ("form", "revoke"):
             raise
-        if column == "perbaikan_biaya_pembelian" and value == 0 and field.count() == 0:
-            print("  [SKIP] Biaya pembelian: Excel 0, input tidak tersedia; tanpa remarks.", flush=True)
-            return None
         raise ValueError("Input tidak tersedia/unik: " + FIELDS[column]) from error
     return field
 
@@ -89,12 +97,12 @@ def buka_usaha(page, target):
     pola_ringkas = re.compile(r"^\s*" + re.escape(ringkas).replace(r"\ ", r"\s+") + r"\s*(?:[(<][\s\S]*)?$", re.I)
     kandidat = daftar.get_by_text(pola_usaha(target)).or_(daftar.get_by_text(pola_ringkas)).filter(visible=True)
     # ponytail: kartu muncul menandai daftar siap; gunakan indikator selesai jika tersedia.
-    terlihat = " | ".join(" ".join(text.split()) for text in cards.all_inner_texts())[:1500]
     try:
         expect(kandidat.first).to_be_visible(timeout=TIMEOUT_CARI_USAHA)
     except AssertionError as error:
         if page.is_closed():
             raise
+        terlihat = " | ".join(" ".join(text.split()) for text in cards.all_inner_texts())[:1500]
         raise ValueError("Kartu usaha tidak cocok: " + target + " | Kartu terlihat: " + terlihat) from error
     pattern = re.compile(r"^\s*" + re.escape(target).replace(r"\ ", r"\s+") + r"\s*$", re.I)
     name = daftar.get_by_text(pattern).filter(visible=True)
@@ -161,14 +169,15 @@ def tampilan_kirim(page):
         page.get_by_text("Konfirmasi Kirim", exact=True).filter(visible=True))
 
 def input_aktif(page):
-    fields = page.locator(SELECTORS["switch"])
-    for label in FIELDS.values():
-        fields = fields.or_(inputan(page, label))
-    return fields.and_(page.locator(':enabled:not([readonly]):not([aria-disabled="true"])')).filter(visible=True)
+    aktif = page.locator(':enabled:not([readonly]):not([aria-disabled="true"])')
+    return page.locator(SELECTORS["switch"]).and_(aktif).filter(visible=True).count() or any(
+        inputan(page, label).and_(aktif).count() for label in FIELDS.values())
 
 def posisi(page):
     if sukses_kirim(page).is_visible():
         return "sukses"
+    if page.locator(SELECTORS["loading"]).count():
+        return "memuat"
     if page.locator(SELECTORS["konfirmasi_revoke"]).is_visible():
         return "konfirmasi revoke"
     if tampilan_kirim(page).count():
@@ -180,7 +189,7 @@ def posisi(page):
     if page.locator(SELECTORS["edit"]).is_visible():
         return "edit"
     kirim_awal = page.get_by_role("button", name="Kirim", exact=True).filter(visible=True).count()
-    if page.locator(SELECTORS["blok_ii"]).is_visible() and (input_aktif(page).count() or kirim_awal or not page.get_by_role("button", name="Ringkasan", exact=True).filter(visible=True).count()):
+    if page.locator(SELECTORS["blok_ii"]).is_visible() and (kirim_awal or input_aktif(page) or not page.get_by_role("button", name="Ringkasan", exact=True).filter(visible=True).count()):
         return "form"
     if kirim_awal:
         return "kirim awal"
@@ -242,17 +251,12 @@ def kirim(page, pulih=None):
     galat = modal.get_by_role("button", name=re.compile(r"^Galat\s+[1-9]\d*\s+Perlu diperbaiki$")).filter(visible=True)
     rincian = modal.filter(has=page.get_by_text(re.compile(r"^Total:\s*\d+\s*/\s*\d+$")))
     awal = page.locator("body").filter(has_not=modal).get_by_role("button", name="Kirim", exact=True).filter(visible=True)
+    loading = page.locator(SELECTORS["loading"])
     terakhir, waktu = None, 0
     terlihat, lapor = None, monotonic()
     while not sukses.is_visible():
         if pulih is not None and pulih():
             raise Error("Kirim terputus oleh refresh; periksa ulang form dan hasil kirim.")
-        akses = page.locator(SELECTORS["konfirmasi_revoke"]).or_(page.locator(SELECTORS["revoke"])).or_(page.locator(SELECTORS["edit"]))
-        kembali = terakhir in ("Kirim pada modal validasi", "Konfirmasi Kirim") and awal.count() and awal.is_enabled()
-        if akses.count() or kembali or (not awal.count() and not modal.count() and not konfirmasi.count()):
-            sekarang = posisi_stabil(page)
-            if sekarang not in ("pengiriman", "kirim awal", "memuat", "sukses"):
-                raise Error("Tampilan Kirim berubah menjadi " + sekarang + "; tentukan ulang aksi.")
         try:
             expect(page.locator("body")).to_be_visible(timeout=TIMEOUT)
             if pulih is not None and pulih():
@@ -260,7 +264,9 @@ def kirim(page, pulih=None):
             if sukses.is_visible():
                 break
             tombol = None
-            if rincian.count():
+            if loading.count():
+                tahap = "Menunggu respons Kirim/loading"
+            elif rincian.count():
                 tahap = "rincian Galat"
                 if rincian.locator(r"ul.tw\:text-destructive > li").first.is_visible():
                     detail = pesan_galat(page)
@@ -275,6 +281,10 @@ def kirim(page, pulih=None):
                 if terakhir != "buka Galat":
                     tombol = modal.last.get_by_role("button", name="Kirim", exact=True)
             else:
+                # Form di belakang tetap terlihat selama request; bukan alasan membuka Edit lagi.
+                sekarang = posisi_stabil(page) if not awal.count() else "kirim awal"
+                if sekarang not in ("form", "pengiriman", "kirim awal", "memuat", "sukses") and not (sekarang == "edit" and terakhir is not None):
+                    raise Error("Tampilan Kirim berubah menjadi " + sekarang + "; tentukan ulang aksi.")
                 tahap, tombol = "Kirim awal", awal
             if sukses.is_visible():
                 break
@@ -301,7 +311,7 @@ def kirim(page, pulih=None):
             if isinstance(error, AssertionError) and "timeout" not in str(error).lower():
                 raise
             sekarang = posisi_stabil(page)
-            if sekarang not in ("pengiriman", "kirim awal", "memuat", "sukses"):
+            if sekarang not in ("form", "pengiriman", "kirim awal", "memuat", "sukses") and not (sekarang == "edit" and terakhir is not None):
                 raise
             status = "Menunggu tampilan siap: " + str(error).splitlines()[0][:160]
         if sukses.is_visible():
@@ -457,7 +467,7 @@ def jalankan(pemulihan=False):
     fingerprint = identitas(root / ".fasih-profile" / "fingerprint.json")
     headless = False
     print(f"[MULAI] {len(rows)} baris; headless={headless}. Membuka browser dan memuat sesi tersimpan.", flush=True)
-    with Camoufox(persistent_context=True, user_data_dir=str(root / ".fasih-profile"), fingerprint=fingerprint, i_know_what_im_doing=True, headless=headless, humanize=True, os="windows", locale="id-ID", timeout=TIMEOUT) as browser:
+    with Camoufox(persistent_context=True, user_data_dir=str(root / ".fasih-profile"), fingerprint=fingerprint, i_know_what_im_doing=True, headless=headless, humanize=False, os="windows", locale="id-ID", timeout=TIMEOUT) as browser:
         browser.set_default_timeout(TIMEOUT)
         browser.set_default_navigation_timeout(TIMEOUT)
         dimuat_ulang = False
@@ -514,6 +524,7 @@ def jalankan(pemulihan=False):
         dimuat_ulang = False
         sisa = random.randint(cfg["batch_min"], cfg["batch_max"])
         for index, (number, row, values) in enumerate(rows):
+            mulai_baris = monotonic()
             print(f"[{index + 1}/{len(rows)}] Baris Excel {number}: {row['target_usaha']}", flush=True)
             sheet.cell(number, status, "ERROR")
             simpan(book, path)
@@ -634,7 +645,8 @@ def jalankan(pemulihan=False):
                                         return
                                     if not field.is_editable():
                                         raise Error("Input belum dapat diedit; periksa tampilan aktif.")
-                                    berbeda = not field.input_value().strip() or angka(field.input_value()) != values[column]
+                                    sebelum = field.input_value()
+                                    berbeda = not sebelum.strip() or angka(sebelum) != values[column]
                                     perlu_catatan = perlu_catatan or berbeda
                                     if berbeda or isi_ulang or diubah:
                                         diubah = kirim_ulang = changed = True
@@ -731,7 +743,7 @@ def jalankan(pemulihan=False):
                 cell.value, cell.data_type = text, "s"
             simpan(book, path)
             hasil[result] += 1
-            print(f"  [HASIL] {sheet.cell(number, status).value}; progres disimpan.", flush=True)
+            print(f"  [HASIL] {sheet.cell(number, status).value}; durasi={monotonic() - mulai_baris:.1f} detik; progres disimpan.", flush=True)
             if note:
                 print("  [CATATAN] " + note.splitlines()[0], flush=True)
             page = assignment
